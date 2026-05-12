@@ -14,6 +14,13 @@ DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 ME="$(basename "$0")"
 INTERVAL_SECS=5
 
+# Probe uncore PMU availability (KVM guests often hide amd_l3 / amd_df / amd_umc).
+# Event groups depending on absent PMUs are nulled out below to keep the rest usable.
+HAS_AMD_L3=0;    [ -d /sys/bus/event_source/devices/amd_l3 ] && HAS_AMD_L3=1
+HAS_AMD_DF=0;    [ -d /sys/bus/event_source/devices/amd_df ] && HAS_AMD_DF=1
+HAS_MSR_APERF=0; [ -f /sys/bus/event_source/devices/msr/events/aperf ] && HAS_MSR_APERF=1
+HAS_MSR_MPERF=0; [ -f /sys/bus/event_source/devices/msr/events/mperf ] && HAS_MSR_MPERF=1
+
 # Disable NMI watchdog
 sysctl kernel.nmi_watchdog=0 >/dev/null
 
@@ -41,8 +48,15 @@ EX_RET_MMX_FP_INSTR="-e '{cpu/event=0x0cb,umask=0x04,name=ex_ret_mmx_fp_instr.ss
 LS_DISPATCH_LD_STORE="-e ls_dispatch.ld_dispatch,ls_dispatch.store_dispatch"
 LS_NOT_HALTED_CYC_BACKEND_STALLS="-e '{cpu/ls_not_halted_cyc,name=ls_not_halted_cyc_backend/,de_no_dispatch_per_slot.backend_stalls,ex_no_retire.load_not_complete,ex_no_retire.not_complete,de_no_dispatch_per_slot.smt_contention}'"
 R1F25_U_KH="-e '{r1f25:u,r1f25:kh}'"
+BTB_EVENTS="-e '{bp_de_redirect,bp_l2_btb_correct,bp_dyn_ind_pred}'"
 
-COMMON_CORE_EVENTS="${L3_LOOKUP_STATE} ${LS_ANY_FILLS_FROM_SYS} ${LS_ANY_FILLS_FROM_SYS_ADDITIONAL} ${LS_L1_D_TLB_MISS_ALL} ${LS_L1_D_TLB_MISS_HITS} ${BP_L1_TLB_MISS_L2_TLB} ${IC_ANY_FILLS_FROM_SYS} ${EX_RET_BRN} ${LS_HW_PF_DC_FILLS} ${LS_DMND_FILLS_FROM_SYS_ALL} ${EX_RET_UCODE_INSTR} ${EX_RET_UCODE_OPS} ${EX_RET_BRN_TKN} ${EX_RET_NEAR_RET} ${L3_XI_SAMPLED_LATENCY} ${DE_OP_QUEUE_EMPTY} ${INSTRUCTIONS_U_KH} ${LS_INT_TAKEN} ${EX_RET_MMX_FP_INSTR} ${LS_DISPATCH_LD_STORE} ${LS_NOT_HALTED_CYC_BACKEND_STALLS} ${R1F25_U_KH}"
+# Skip amd_l3-dependent groups when that PMU isn't exposed
+if [ "$HAS_AMD_L3" = "0" ]; then
+  L3_LOOKUP_STATE=""
+  L3_XI_SAMPLED_LATENCY=""
+fi
+
+COMMON_CORE_EVENTS="${L3_LOOKUP_STATE} ${LS_ANY_FILLS_FROM_SYS} ${LS_ANY_FILLS_FROM_SYS_ADDITIONAL} ${LS_L1_D_TLB_MISS_ALL} ${LS_L1_D_TLB_MISS_HITS} ${BP_L1_TLB_MISS_L2_TLB} ${IC_ANY_FILLS_FROM_SYS} ${EX_RET_BRN} ${LS_HW_PF_DC_FILLS} ${LS_DMND_FILLS_FROM_SYS_ALL} ${EX_RET_UCODE_INSTR} ${EX_RET_UCODE_OPS} ${EX_RET_BRN_TKN} ${EX_RET_NEAR_RET} ${L3_XI_SAMPLED_LATENCY} ${DE_OP_QUEUE_EMPTY} ${INSTRUCTIONS_U_KH} ${LS_INT_TAKEN} ${EX_RET_MMX_FP_INSTR} ${LS_DISPATCH_LD_STORE} ${LS_NOT_HALTED_CYC_BACKEND_STALLS} ${R1F25_U_KH} ${BTB_EVENTS}"
 
 # Common DF Events
 COMMON_DF_EVENTS='-e amd_df/event=0x00c,umask=0x2b7,name=cs0_probes_sent/'
@@ -99,6 +113,14 @@ else
 fi
 
 
+# Skip amd_df-dependent groups when that PMU isn't exposed
+if [ "$HAS_AMD_DF" = "0" ]; then
+  COMMON_DF_EVENTS=""
+  ZEN5_DMA=""
+  ZEN5_CSBW=""
+  CS_CMP_CXL=""
+fi
+
 ZEN5_EVENTS="${DE_DISPATCH_STALL_CYCLE_DYNAMIC_TOKENS} ${FRONTEND_LATENCY} ${DE_SRC_OP_DISP_X86_DECODER_OP_CACHE} ${L2_PF_MISS_L2_HIT_L3} ${DE_DIS_OPS_FROM_DECODER_FP_INTEGER_DISPATCH} ${CS_CMP_CXL}"
 
 # ZEN5ES EVENTS
@@ -141,13 +163,22 @@ collect_counters() {
     interval="$INTERVAL_SECS"
   fi
   interval_ms="$((interval * 1000))"
+  # Cycles source: msr/aperf is the most accurate on bare metal, fall back to standard cycles in VMs
+  if [ "$HAS_MSR_APERF" = "1" ]; then
+    cycles_event="msr/aperf,name=cycles/"
+  else
+    cycles_event="cycles"
+  fi
+  # mperf is only available on bare metal; without it we lose the "overall_utilization_pct" metric
+  mperf_event=""
+  [ "$HAS_MSR_MPERF" = "1" ] && mperf_event="-e msr/mperf,name=mperf/"
   model_name=$(lscpu | grep -i "Model name" )
   if [[ $model_name =~ (AMD.*EPYC|100-000000976-14|100-000001458-01|100-000001460-02|100-000001537-04|100-000001463-04|100-000001535-05) ]]; then
     # zen5
-    events="msr/aperf,name=cycles/ -e cpu/instructions,name=instructions/ -e msr/tsc,name=tsc/ -e msr/mperf,name=mperf/ ${COMMON_CORE_EVENTS} ${COMMON_DF_EVENTS} ${ZEN5_DMA} ${ZEN5_CSBW} ${ZEN5_EVENTS} ${ZEN5_UMC}"
+    events="${cycles_event} -e cpu/instructions,name=instructions/ -e msr/tsc,name=tsc/ ${mperf_event} ${COMMON_CORE_EVENTS} ${COMMON_DF_EVENTS} ${ZEN5_DMA} ${ZEN5_CSBW} ${ZEN5_EVENTS} ${ZEN5_UMC}"
   else
     # zen5es
-    events="msr/aperf,name=cycles/ -e cpu/instructions,name=instructions/ -e msr/tsc,name=tsc/ -e msr/mperf,name=mperf/ ${COMMON_CORE_EVENTS} ${COMMON_DF_EVENTS} ${ZEN5_DMA} ${ZEN5_CSBW} ${ZEN5ES_EVENTS} ${ZEN5ES_UMC}"
+    events="${cycles_event} -e cpu/instructions,name=instructions/ -e msr/tsc,name=tsc/ ${mperf_event} ${COMMON_CORE_EVENTS} ${COMMON_DF_EVENTS} ${ZEN5_DMA} ${ZEN5_CSBW} ${ZEN5ES_EVENTS} ${ZEN5ES_UMC}"
   fi
   perf_stat "${events}" "${interval_ms}"
 }

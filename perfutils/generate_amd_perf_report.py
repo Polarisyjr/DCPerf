@@ -1496,6 +1496,45 @@ def zen5_l3_miss_avg_load_to_use_latency_ns(grouped_df):
 
 
 @skip_if_missing
+def zen5_btb_miss_pki(grouped_df):
+    btb_miss_series = grouped_df.get_group("bp_de_redirect").counter_value
+    inst_series = grouped_df.get_group("instructions").counter_value
+    btb_miss_series.index = inst_series.index
+    btb_miss_pki_series = btb_miss_series.div(inst_series)
+    return {
+        "name": "BTB Miss PKI",
+        "series": btb_miss_pki_series,
+        "prefix": 1000,
+    }
+
+
+@skip_if_missing
+def zen5_l2_btb_correct_pki(grouped_df):
+    l2_btb_correct_series = grouped_df.get_group("bp_l2_btb_correct").counter_value
+    inst_series = grouped_df.get_group("instructions").counter_value
+    l2_btb_correct_series.index = inst_series.index
+    l2_btb_correct_pki_series = l2_btb_correct_series.div(inst_series)
+    return {
+        "name": "L2 BTB Correct PKI",
+        "series": l2_btb_correct_pki_series,
+        "prefix": 1000,
+    }
+
+
+@skip_if_missing
+def zen5_dyn_ind_pred_pki(grouped_df):
+    dyn_ind_pred_series = grouped_df.get_group("bp_dyn_ind_pred").counter_value
+    inst_series = grouped_df.get_group("instructions").counter_value
+    dyn_ind_pred_series.index = inst_series.index
+    dyn_ind_pred_pki_series = dyn_ind_pred_series.div(inst_series)
+    return {
+        "name": "Dynamic Indirect Branch Pred PKI",
+        "series": dyn_ind_pred_pki_series,
+        "prefix": 1000,
+    }
+
+
+@skip_if_missing
 def zen5_l1_itlb_miss_pki(grouped_df):
     bp_l1_tlb_miss_l2_tlb_hit_series = grouped_df.get_group(
         "bp_l1_tlb_miss_l2_tlb_hit"
@@ -2341,12 +2380,17 @@ def get_memory_info():
         ):
             num_channels += 1
     # Get the DDR frequency
+    ddr_freq = 0
     ddr_freq_out = subprocess.check_output(["sudo", "dmidecode"]).decode("utf-8")
     ddr_freq_lines = ddr_freq_out.split("\n")
     for line in ddr_freq_lines:
         if "Configured Memory Speed" in line:
-            ddr_freq = int(line.split(":")[1].strip().split()[0])
-            break
+            token = line.split(":")[1].strip().split()[0]
+            try:
+                ddr_freq = int(token)
+                break
+            except ValueError:
+                continue
     return num_channels, ddr_freq
 
 
@@ -2428,6 +2472,9 @@ def main(
             zen5_branch_retired_indirect_jump_pki(grouped_df),
             zen5_branch_retired_near_return_pki(grouped_df),
             zen5_branch_retired_near_return_mispred_pki(grouped_df),
+            zen5_btb_miss_pki(grouped_df),
+            zen5_l2_btb_correct_pki(grouped_df),
+            zen5_dyn_ind_pred_pki(grouped_df),
             zen5_fp_instr_retired_pki(grouped_df),
             zen5_fp_sse_avx_instr_retired_pki(grouped_df),
             zen5_ls_uop_disp_ld_pki(grouped_df),
