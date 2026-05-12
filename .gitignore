@@ -1,5 +1,8 @@
 # benchmark output
 results/
+benchmark_metrics_*
+benchmark_installs.txt
+benchpress.log
 
 # benchmarks binaries
 benchmarks/
