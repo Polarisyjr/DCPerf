@@ -16,11 +16,13 @@ from benchpress.lib.hook import Hook
 from .perf_monitors import (
     cpufreq_cpuinfo,
     cpufreq_scaling,
+    ctxsw,
     memstat,
     mpstat,
     netstat,
     perfstat,
     power,
+    syscall_ebpf,
     topdown,
 )
 
@@ -41,6 +43,8 @@ DEFAULT_OPTIONS = {
     "memstat": {"interval": 5, "additional_counters": []},
     "topdown": {},
     "power": {"interval": 1},
+    "ctxsw": {"interval": 5},
+    "syscall_ebpf": {"interval": 5},
 }
 
 AVAIL_MONITORS = {
@@ -52,6 +56,8 @@ AVAIL_MONITORS = {
     "memstat": memstat.MemStat,
     "topdown": topdown.TopDown,
     "power": power.Power,
+    "ctxsw": ctxsw.CtxSw,
+    "syscall_ebpf": syscall_ebpf.SyscallEBPF,
 }
 
 logger = logging.getLogger(__name__)
@@ -107,3 +113,24 @@ class Perf(Hook):
             monitor.terminate()
         for monitor in self.monitors:
             monitor.write_csv()
+        # After every monitor has written its primary CSV, give each one
+        # a chance to emit derived metrics that depend on sibling
+        # monitors (e.g., ctxsw and syscall_ebpf reading `instructions`
+        # from perfstat.csv or topdown-intel.sys.csv to compute per-kI).
+        # Not all monitors inherit from the `Monitor` base class
+        # (`AMDPerfUtil` and `DummyPerfUtil` in topdown.py do not), so
+        # only invoke `post_process` when the attribute is actually
+        # present and callable.
+        for monitor in self.monitors:
+            pp = getattr(monitor, "post_process", None)
+            if not callable(pp):
+                continue
+            try:
+                pp()
+            except Exception as e:
+                mon_name = getattr(monitor, "name", type(monitor).__name__)
+                logger.warning(
+                    f"Could not run post_process for {mon_name} due to "
+                    "the following exception:"
+                )
+                logger.warning(traceback.print_exception(type(e), e, e.__traceback__))

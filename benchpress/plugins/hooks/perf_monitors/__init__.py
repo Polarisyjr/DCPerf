@@ -7,6 +7,7 @@
 # pyre-unsafe
 
 import abc
+import csv
 import logging
 import os
 import signal
@@ -42,6 +43,15 @@ class Monitor:
 
     def process_output(self, line):
         """Define custom ways to process each line of output"""
+        pass
+
+    def post_process(self):
+        """Optional hook invoked after all monitors have terminated and
+        written their primary CSVs. Subclasses may override this to emit
+        derived metrics that need data from sibling monitors (e.g.,
+        per-kI normalization using `instructions` from perfstat or
+        PerfSpect3).
+        """
         pass
 
     def output_catcher(self):
@@ -130,8 +140,67 @@ class Monitor:
         return csv_text
 
     def write_csv(self):
-        csv = self.gen_csv()
-        if len(csv.strip()) == 0:
+        csv_text = self.gen_csv()
+        if len(csv_text.strip()) == 0:
             return
         with open(self.csvpath, "w") as f:
-            f.write(csv)
+            f.write(csv_text)
+
+
+_PERFSPECT_INST_COLUMNS = (
+    "instructions",
+    "inst_retired.any",
+    "inst_retired_any",
+    "metric_instructions",
+)
+
+
+def _read_csv_instructions_column(path, candidates):
+    """Read a CSV and return the first numeric column whose header
+    matches one of `candidates` (case-insensitive, trimmed). Returns a
+    list of floats, or None if no matching column is found.
+    """
+    try:
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                return None
+            lowered = {c.strip().lower(): c for c in reader.fieldnames}
+            target = None
+            for cand in candidates:
+                if cand in lowered:
+                    target = lowered[cand]
+                    break
+            if target is None:
+                return None
+            out = []
+            for row in reader:
+                v = row.get(target, "")
+                try:
+                    out.append(float(str(v).strip()))
+                except (TypeError, ValueError):
+                    out.append(0.0)
+            return out
+    except OSError:
+        return None
+
+
+def load_instructions_per_interval(metrics_dir):
+    """Load per-interval retired-instruction counts emitted by either
+    `PerfStat` (perfstat.csv) or `IntelPerfSpect3`
+    (topdown-intel.sys.csv). Returns a list of floats aligned by row
+    order, or None if neither source is available.
+
+    PerfStat is preferred since its format is fixed and the column name
+    is exactly `instructions`. PerfSpect3 is used as a fallback; its
+    column naming is best-effort.
+    """
+    pstat = os.path.join(metrics_dir, "perf-stat.csv")
+    out = _read_csv_instructions_column(pstat, ("instructions",))
+    if out:
+        return out
+    pspect = os.path.join(metrics_dir, "topdown-intel.sys.csv")
+    out = _read_csv_instructions_column(pspect, _PERFSPECT_INST_COLUMNS)
+    if out:
+        return out
+    return None

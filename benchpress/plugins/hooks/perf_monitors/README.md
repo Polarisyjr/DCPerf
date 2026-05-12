@@ -14,6 +14,8 @@ while running DCPerf benchmarks.
 | [cpufreq_scaling](#cpufreq_scaling) <br> [cpufreq_cpuinfo](#cpufreq_cpuinfo) | Monitors CPU frequency during benchmarks. |
 | [topdown](#topdown) | Monitors uArch and top-down telemetries such as cache miss rates, memory bandwidth, and frontend/backend boundedness. |
 | [perfstat](#perfstat) | Collects performance counters through the `perf stat` command. Includes IPC by default. |
+| [ctxsw](#ctxsw) | Captures per-interval context switches via `perf`'s software event. Per-kI derived in post-processing from perfstat or PerfSpect3. |
+| [syscall_ebpf](#syscall_ebpf) | Captures per-interval syscall counts by category (fs / mm / thread / net) via bpftrace. x86_64 only. Per-kI derived in post-processing. |
 
 ## Getting started
 
@@ -422,6 +424,65 @@ index,timestamp,cycles,instructions,instructions_per_cycle,interval
 4,09:22:19 AM,23142913640,33494396030,1.4472851841830578,25.028629248,
 5,09:22:24 AM,18922707463,26418532092,1.3961285478654022,30.033638688,
 ```
+
+### ctxsw
+
+`ctxsw` runs `perf stat -a -e context-switches` to count system-wide
+context switches each interval. The `context-switches` event is a
+kernel software event, so the monitor does not occupy any PMU counter
+and is safe to run alongside `PerfStat`, `IntelPerfSpect3`, or any
+topdown collector.
+
+Parameters:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `interval` | int | `5` | Sampling interval in seconds. |
+
+Output:
+
+- `ctxsw.csv` — raw per-interval `context_switches` counts.
+- `ctxsw.derived.csv` (post-processing) — joins the raw counts with the
+  `instructions` column from `perf-stat.csv` (preferred) or
+  `topdown-intel.sys.csv` (PerfSpect3 fallback) by row index, and emits
+  `ctxsw_per_kI`. Skipped silently if neither source is present.
+
+### syscall_ebpf
+
+`syscall_ebpf` attaches to `tracepoint:raw_syscalls:sys_enter` via `bpftrace`
+system-wide and emits per-interval syscall counts grouped into four
+categories: `fs` (file system), `mm` (memory management), `thread`
+(process / thread lifecycle, signals, futex, scheduling), and `net`
+(sockets). The syscall-number-to-category mapping follows the Linux
+x86_64 ABI and is vendor independent (same on AMD and Intel).
+
+Parameters:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `interval` | int | `5` | Sampling interval in seconds. |
+
+Requirements:
+
+- `bpftrace` installed (`apt install bpftrace` on Ubuntu, `dnf install
+  bpftrace` on Fedora/CentOS Stream).
+- Root or `CAP_BPF` + `CAP_PERFMON` (kernel ≥ 5.8). Benchpress already
+  expects elevated privileges for `perf`, so no extra setup beyond
+  installing `bpftrace`.
+- Kernel with `CONFIG_DEBUG_INFO_BTF=y` and tracepoints enabled (the
+  default on modern Ubuntu / RHEL / Fedora).
+- x86_64 only. On other architectures the category table will not match
+  and counts will be zero.
+
+Output:
+
+- `syscall-ebpf.csv` — raw per-interval syscall counts per category.
+  Columns: `index,timestamp,fs,mm,net,thread`.
+- `syscall-ebpf.derived.csv` (post-processing) — joins the raw counts
+  with the `instructions` column from `perf-stat.csv` (preferred) or
+  `topdown-intel.sys.csv` (PerfSpect3 fallback) by row index, and emits
+  `<category>_per_kI` columns. Skipped silently if neither source is
+  present.
 
 ## Logging
 
