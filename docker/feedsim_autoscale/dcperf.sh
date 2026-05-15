@@ -40,6 +40,11 @@ require_container() {
         echo "container ${CONTAINER_NAME} is not running; run './dcperf.sh setup' first" >&2
         exit 1
     fi
+    # Re-apply perf gates on every install/bench/shell entry. setup only
+    # relaxes when creating a new container, so a host reboot (which resets
+    # the sysctls to hardening defaults) + plain `start` would leave perf/
+    # bpftrace silently degraded. Idempotent: no-op when already relaxed.
+    relax_perf_paranoid
 }
 
 # Relax host perf gates so in-container perf/bpftrace can see kernel symbols
@@ -47,6 +52,15 @@ require_container() {
 # return <not supported> for cycles/instructions -- this only fixes the
 # software-side restrictions.
 relax_perf_paranoid() {
+    # Skip the sudo call if the host is already relaxed -- lets re-runs of
+    # `setup` work without a TTY for sudo, and avoids re-prompting in CI.
+    local cur_paranoid cur_kptr
+    cur_paranoid=$(sysctl -n kernel.perf_event_paranoid 2>/dev/null || echo 99)
+    cur_kptr=$(sysctl -n kernel.kptr_restrict 2>/dev/null || echo 99)
+    if [ "${cur_paranoid}" -le 0 ] && [ "${cur_kptr}" -eq 0 ]; then
+        echo "    (already relaxed: perf_event_paranoid=${cur_paranoid} kptr_restrict=${cur_kptr})"
+        return 0
+    fi
     sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 >/dev/null
 }
 
