@@ -166,6 +166,7 @@
         - 'iterations=7'
         - 'reps=0'
   hooks:
+    - hook: perf
     - hook: copymove
       options:
         is_move: true
@@ -331,11 +332,7 @@
     - 'num_instances=-1'
     - 'extra_args='
   hooks:
-    - hook: cpu-mpstat
-      options:
-        args:
-          - '-u'   # utilization
-          - '1'    # second interval
+    - hook: perf
     - hook: copymove
       options:
         is_move: true
