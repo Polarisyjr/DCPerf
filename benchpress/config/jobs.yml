@@ -724,11 +724,7 @@
     - 'parallelism=1'
     - 'procs=-1'
   hooks:
-    - hook: cpu-mpstat
-      options:
-        args:
-          - '-u'   # utilization
-          - '1'    # second interval
+    - hook: perf
     - hook: copymove
       options:
         is_move: true

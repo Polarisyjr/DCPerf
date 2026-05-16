@@ -69,6 +69,7 @@ load_bench() {
     bench_patch_jobs_yml() { :; }
     bench_force_cleanup()  { :; }
     bench_pre_install()    { :; }
+    bench_post_install()   { :; }
     # shellcheck source=/dev/null
     source "$BENCH_DIR/start.sh"
     if [ -z "${BENCH_JOB:-}" ]; then
@@ -217,7 +218,7 @@ cmd_install() {
 
     local force=0
     case "${1:-}" in
-        --force|--reinstall) force=1 ;;
+        -f|--force|--reinstall) force=1 ;;
     esac
 
     if [ "${force}" = 0 ] && [ -n "${BENCH_INSTALL_PROBE}" ] && \
@@ -254,6 +255,10 @@ cmd_install() {
     docker exec "${BENCH_CONTAINER}" bash -c \
         "cd /DCPerf && ./benchpress_cli.py install ${bp_force} ${BENCH_JOB}" \
         2>&1 | tee "${log}"
+
+    # If pre_install launched background work (e.g. videotranscode's parallel
+    # dataset download), join it here before declaring install done.
+    bench_post_install
 
     if [ -n "${BENCH_INSTALL_PROBE}" ] && \
        docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}"; then
