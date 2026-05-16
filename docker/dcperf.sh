@@ -276,8 +276,15 @@ cmd_bench() {
     # script itself exits, which is also what we want for cmd_all.
     trap restore_perf_gates EXIT
     echo "==> running ${BENCH_JOB}${BENCH_RUN_ETA:+ (${BENCH_RUN_ETA})}"
-    docker exec "${BENCH_CONTAINER}" bash -c \
-        "cd /DCPerf && ./benchpress_cli.py run ${BENCH_JOB} ${BENCH_RUN_ARGS[*]:-}"
+    # docker exec -w replaces the previous `bash -c "cd /DCPerf && ..."`
+    # form so we don't need a shell layer to handle cwd. Passing args as
+    # exec argv (not joined into a single bash -c string) preserves
+    # quoting for benchpress -i JSON, e.g.
+    #   ./dcperf.sh taobench bench -i '{"memsize":128}'
+    # ${BENCH_RUN_ARGS[@]} expands to nothing when the array is empty
+    # (unlike [*] in a single-quoted string), so empty arrays are safe.
+    docker exec -w /DCPerf "${BENCH_CONTAINER}" \
+        ./benchpress_cli.py run "${BENCH_JOB}" "${BENCH_RUN_ARGS[@]}" "$@"
 }
 
 cmd_all() {
@@ -334,7 +341,7 @@ case "${1:-help}" in
     build)      shift; cmd_build ;;
     setup)      shift; cmd_setup ;;
     install)    shift; cmd_install "$@" ;;
-    bench|run)  shift; cmd_bench ;;
+    bench|run)  shift; cmd_bench "$@" ;;
     shell)      shift; cmd_shell ;;
     stop)       shift; cmd_stop ;;
     clean)      shift; cmd_clean ;;
