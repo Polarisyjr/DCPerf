@@ -16,19 +16,16 @@ BENCH_JOB="tao_bench_standalone"
 BENCH_INSTALL_PROBE="/DCPerf/benchmarks/tao_bench/tao_bench_client"
 BENCH_RUN_ARGS=()
 BENCH_INSTALL_ETA="builds OpenSSL 3.3.2 + libevent + folly (huge) + memcached + memtier_benchmark from source; ~25-50 min"
-BENCH_RUN_ETA="memsize=128 GB -> warmup ≈ 20 min (1200 s floor) + test 720 s + cooldown ≈ 35 min total"
+# Upstream default: memsize=0 -> 75% of system memory; on a 690 GiB host
+# that's ~517 GB which bloats warmup to ~43 min. Pass `-i '{"memsize":N}'`
+# to override at run time, e.g.:
+#   ./docker/dcperf.sh taobench bench -i '{"memsize":128}'
+#   ./docker/dcperf.sh taobench bench -i '{"memsize":256,"test_time":540}'
+BENCH_RUN_ETA="upstream defaults; on this host ~55 min total (warmup ~43 min + test 12 min). Override memsize with -i '{\"memsize\":N}'."
 
-# Two-part jobs.yml edit on tao_bench_standalone:
-#   1. Insert the `perf` hook bundle ahead of the default copymove hook
-#      (same 10-monitor bundle feedsim_autoscale/django/mediawiki use).
-#   2. Rewrite the memsize var default from 0 (= 75% of system memory)
-#      to 128. Two reasons: (a) on this host 75% would be ~517 GB which
-#      bloats warmup to 43 min with no measurement value for a first
-#      pass; (b) standalone runs server AND clients on the same machine,
-#      and 75% server memory leaves the clients fighting for the
-#      remaining 25% which has been observed to OOM the memtier clients
-#      on similar core counts.
-# Both edits are idempotent.
+# Inject the `perf` hook bundle ahead of the default copymove hook for the
+# tao_bench_standalone entry (same 10-monitor bundle feedsim_autoscale /
+# django / mediawiki / videotranscode use). Idempotent.
 bench_patch_jobs_yml() {
     docker exec -i "$BENCH_CONTAINER" python3 - <<'PYEOF'
 import pathlib, re, sys
@@ -45,37 +42,23 @@ m = re.search(
 if not m:
     sys.exit('jobs.yml: tao_bench_standalone entry not found')
 block = m.group(0)
-new_block = block
-changed = []
 
-# --- 1. perf hook injection ---
-if '- hook: perf' not in new_block:
-    nb, n = re.subn(
-        r'(^  hooks:\n)(    - hook: )',
-        r'\1    - hook: perf\n\2',
-        new_block,
-        count=1,
-        flags=re.M,
-    )
-    if n == 0:
-        sys.exit('jobs.yml: tao_bench_standalone hooks block does not match expected layout')
-    new_block = nb
-    changed.append('perf hook inserted')
-else:
-    changed.append('perf hook already present')
+if '- hook: perf' in block:
+    print('jobs.yml: already patched (perf hook present)')
+    sys.exit(0)
 
-# --- 2. memsize default rewrite ---
-if "'memsize=0'" in new_block:
-    new_block = new_block.replace("'memsize=0'", "'memsize=128'", 1)
-    changed.append('memsize default 0 -> 128')
-elif "'memsize=128'" in new_block:
-    changed.append('memsize default already 128')
-else:
-    print('jobs.yml: WARN tao_bench_standalone memsize var not in expected form; left as-is')
+new_block, n = re.subn(
+    r'(^  hooks:\n)(    - hook: )',
+    r'\1    - hook: perf\n\2',
+    block,
+    count=1,
+    flags=re.M,
+)
+if n == 0:
+    sys.exit('jobs.yml: tao_bench_standalone hooks block does not match expected layout')
 
-if new_block != block:
-    p.write_text(s.replace(block, new_block, 1))
-print('jobs.yml: ' + '; '.join(changed))
+p.write_text(s.replace(block, new_block, 1))
+print('jobs.yml: inserted perf hook into tao_bench_standalone')
 PYEOF
 }
 

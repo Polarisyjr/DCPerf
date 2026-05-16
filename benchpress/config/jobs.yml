@@ -630,7 +630,7 @@
     - '--disable-tls={disable_tls}'
   vars:
     - 'num_servers=0'
-    - 'memsize=128'
+    - 'memsize=0'
     - 'fast_threads_ratio=0.75'
     - 'slow_to_fast_ratio=3'
     - 'warmup_time=0'
