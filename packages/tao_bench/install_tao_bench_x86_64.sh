@@ -90,7 +90,29 @@ fi
 pushd folly
 git checkout v2024.06.24.00
 sed -i 's/FOLLY_ALWAYS_INLINE//g' "${TAO_BENCH_ROOT}/folly/folly/experimental/symbolizer/StackTrace.cpp"
-OPENSSL_ROOT_DIR="${TAO_BENCH_DEPS}" ./build/fbcode_builder/getdeps.py --allow-system-packages build \
+# folly v2024.06.24.00 bundles a zlib patch whose unified-diff headers
+# (`--- ../zlib-1.3.1/X`, `+++ ./X`) confuse `git apply -p1` -- after
+# stripping one path component the two sides disagree, so git rejects the
+# patch. `patch -p1` is more lenient and would accept it, but
+# getdeps/builder.py:_apply_patchfile uses git apply unconditionally.
+# Rewrite the headers to git-standard `a/X` / `b/X` form so getdeps can
+# apply them.
+sed -i \
+    -e 's|^\(--- \)\.\./zlib-1\.3\.1/|\1a/|' \
+    -e 's|^\(+++ \)\./|\1b/|' \
+    "${TAO_BENCH_ROOT}/folly/build/fbcode_builder/patches/zlib_dont_build_more_than_needed.patch"
+# GIT_CEILING_DIRECTORIES: when run from inside the container with
+# BENCHPRESS_ROOT bind-mounted from a host git-submodule, /DCPerf/.git is a
+# `gitdir:` pointer file resolving to a path that exists only on the host.
+# folly's getdeps invokes `git apply` from the extracted source tree, which
+# walks up looking for a parent repo and finds /DCPerf/.git, then dies with
+# "not a git repository: /DCPerf/../../.git/modules/...". Telling git to
+# stop searching at /DCPerf makes it ignore that pointer file. Harmless
+# outside the container -- bare-metal hosts have no /DCPerf/.git for git
+# to find.
+GIT_CEILING_DIRECTORIES="${BENCHPRESS_ROOT}" \
+    OPENSSL_ROOT_DIR="${TAO_BENCH_DEPS}" \
+    ./build/fbcode_builder/getdeps.py --allow-system-packages build \
     --scratch-path "${FOLLY_BUILD_ROOT}"
 popd
 
