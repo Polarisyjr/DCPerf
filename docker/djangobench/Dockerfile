@@ -51,5 +51,16 @@ RUN dnf install -y \
 # switch to") and uwsgi can't reach the cache.
 RUN useradd -r -g memcached -s /sbin/nologin memcache
 
+# Override sudo with a transparent passthrough. The container runs as root,
+# so `sudo cmd` is equivalent to `cmd`. The CentOS Stream 9 minimal image
+# ships placeholder /etc/pam.d/{system,password}-auth that include
+# pam_systemd / pam_sss; in a container without logind/sssd the account
+# stage fails ("PAM account management error: Authentication service cannot
+# retrieve authentication info"), which kills generate_amd_perf_report.py's
+# `sudo dmidecode -t 17`. Shimming sudo is cheaper than dragging in
+# authselect + a profile and the container is already rootful by design.
+RUN printf '#!/bin/sh\nexec "$@"\n' > /usr/local/bin/sudo \
+ && chmod +x /usr/local/bin/sudo
+
 WORKDIR /DCPerf
 CMD ["sleep", "infinity"]

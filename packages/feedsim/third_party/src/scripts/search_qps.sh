@@ -212,7 +212,11 @@ warmup_time=""
 final_experiment_time=90
 latency_type=""
 latency_target=""
-load_test_retries=3
+# Bumped from 3 -> 20. Each retry sleeps 7s and gives Leaf time to settle
+# after warmup; on heavy hosts 3 retries (~21s window) regularly catches Leaf
+# mid-warmup and the load test never starts, leaving result CSV with only the
+# header row and benchpress reporting metrics: null.
+load_test_retries=20
 output_csv_file=""
 fixed_qps=""
 auto_driver_threads=""

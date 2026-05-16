@@ -207,7 +207,15 @@ main() {
 
     # FIXME(cltorres)
     # Remove sleep, expose an endpoint or print a message to notify service is ready
-    sleep 90
+    #
+    # Heavy hosts (256+ cores, autoscale w/ 3+ instances) need much longer than
+    # 90 sec for graph build + icache warmup; otherwise search_qps.sh's load
+    # driver finds Leaf still warming up, fails to connect, and after a few
+    # retries produces empty result files -> benchpress reports metrics: null.
+    # Bumped the wait; DCPERF_LEAF_WAIT lets it be tuned per host.
+    LEAF_WAIT="${DCPERF_LEAF_WAIT:-300}"
+    echo "Waiting ${LEAF_WAIT}s for LeafNodeRank warmup (port=$port, monitor=$monitor_port)..."
+    sleep "$LEAF_WAIT"
 
     # FIXME(cltorres)
     # Skip ParentNode for now, and talk directly to LeafNode
