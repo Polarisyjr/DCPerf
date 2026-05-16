@@ -7,6 +7,11 @@ benchpress.log
 # benchmarks binaries
 benchmarks/
 
+# mediawiki install clones into BENCHPRESS_ROOT
+/oss-performance/
+/siege/
+/memcached-1.5.12/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
