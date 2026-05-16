@@ -68,17 +68,18 @@ fi
 mysql -u root --password=$MARIADB_PWD < "${TEMPLATES_DIR}/grant_privileges.sql"
 
 # 5. Install Siege
+# v4.1.7 ships a clean ./utils/bootstrap (autoreconf no longer trips on stale
+# m4 macros), so we no longer need the `automake --add-missing` workaround the
+# v4.0.7 build required. Matches django_workload/install_siege.sh.
 if ! [ -x "$(command -v siege)" ]; then
   # shellcheck disable=SC2046
   git clone https://github.com/JoeDog/siege.git
   cd siege || exit 1
   # shellcheck disable=SC2046
-  git checkout tags/v4.0.7
+  git checkout tags/v4.1.7
   ./utils/bootstrap
-  automake --add-missing
   ./configure
   make -j8
-  sudo make uninstall
   sudo make install
   cd ..
 fi
