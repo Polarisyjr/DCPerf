@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Stage the CDVL ElFuente y4m cuts into DCPerf's expected dataset path.
-# Run this on the HOST (not inside the container) before
-# `./dcperf.sh videotranscode install`.
+# Invoke this on the HOST. The dataset dir under benchmarks/ is normally
+# root-owned (created by benchpress install inside the container via the bind
+# mount), so the host user usually can't write there -- this script therefore
+# delegates every write (mkdir/download/extract/move) into the bench container
+# when it's running, and only falls back to host-side writes if it isn't.
+# So either run `./dcperf.sh videotranscode setup` first (recommended), or make
+# DATASET_DIR host-writable and ensure host 7za is installed.
 #
 # Usage:
 #   ./prep_dataset.sh                          # download from DEFAULT_URL + extract
@@ -65,88 +70,95 @@ cmd_check() {
     fi
 }
 
-# EXTRACT_MODE is set by sevenz_x() to either "host" or "container", and
-# tells finalize_extract() which side to run mv/rm on. Necessary because
-# when 7za ran in the container as root, the extracted files are root-owned
-# on the host and the user-mode bash can't mv/rm them.
-EXTRACT_MODE=""
-
-# Extract $zip into $outdir using 7za. Tries host 7za first, falls back to
-# running 7za inside ${BENCH_CONTAINER} (the videotranscode container's
-# Dockerfile installs p7zip). When using the container, paths translate
-# DCPERF_ROOT -> /DCPerf since /DCPerf is bind-mounted to DCPERF_ROOT.
-# Returns 7za's exit code (>=2 means hard failure; 1 is the harmless
-# warning the CDVL zip's non-standard header always triggers).
-sevenz_x() {
-    local zip="$1" outdir="$2"
-    if command -v 7za >/dev/null 2>&1; then
-        EXTRACT_MODE=host
-        7za x -y -o"$outdir" "$zip"
-        return $?
+# --- Staging side: host vs container ----------------------------------------
+# The dataset dir under benchmarks/ is normally root-owned -- benchpress
+# install creates benchmarks/video_transcode_bench/ inside the container
+# through the /DCPerf bind mount, so the host user can't mkdir/wget/extract
+# into datasets/. Run every write-side step (mkdir, free-space check, download,
+# extract, move) wherever it can actually write. Prefer the container: it's
+# root on the same bind mount and its Dockerfile bakes in wget + curl + p7zip.
+# Fall back to the host only when the container isn't running (then the host
+# itself needs write access to DATASET_DIR and its own 7za).
+STAGE_MODE=""
+pick_stage_mode() {
+    [ -n "$STAGE_MODE" ] && return 0
+    if docker exec "$BENCH_CONTAINER" true >/dev/null 2>&1; then
+        STAGE_MODE=container
+        echo "    (staging inside ${BENCH_CONTAINER}: writes land as root on the bind mount)"
+    else
+        STAGE_MODE=host
+        echo "    (container ${BENCH_CONTAINER} not running; staging on host --"
+        echo "     needs write access to ${DATASET_DIR} and a host 7za)"
     fi
-    if docker exec "$BENCH_CONTAINER" test -x /usr/bin/7za 2>/dev/null; then
-        EXTRACT_MODE=container
-        local zip_c="${zip/#$DCPERF_ROOT/\/DCPerf}"
-        local outdir_c="${outdir/#$DCPERF_ROOT/\/DCPerf}"
-        echo "    (no host 7za; running 7za inside ${BENCH_CONTAINER})"
-        echo "    NOTE: extracted files will be root-owned on host"
-        docker exec "$BENCH_CONTAINER" 7za x -y -o"$outdir_c" "$zip_c"
-        return $?
-    fi
-    cat >&2 <<EOF
-ERROR: 7za not available on host AND container ${BENCH_CONTAINER} is not running.
-Pick one:
-  - Install on host:  sudo apt install -y p7zip-full
-                  or  sudo dnf install -y p7zip p7zip-plugins
-  - Or start the bench container first (it has p7zip baked in):
-        ${DOCKER_DIR}/../dcperf.sh videotranscode setup
-The CDVL zip has a non-standard header; unzip rejects it but 7za tolerates it.
-EOF
-    return 1
 }
 
-# Move every *.y4m anywhere under $tmp into $cuts_dir, then rm -rf $tmp. Runs
-# on the same side as 7za did (set by EXTRACT_MODE) so we own everything we
-# touch. If $force=1, wipe any pre-existing y4m in $cuts_dir first.
-# Echoes the number of files moved.
+# spath <hostpath>: translate a host path under DCPERF_ROOT to the path the
+# staging side sees (/DCPerf-rooted in container mode, unchanged on host).
+spath() {
+    if [ "$STAGE_MODE" = container ]; then
+        printf '%s' "${1/#$DCPERF_ROOT/\/DCPerf}"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# stage_run <argv...>: run a command on the staging side. argv form (not a
+# bash -c string) so callers don't fight quoting; pass paths through spath.
+stage_run() {
+    if [ "$STAGE_MODE" = container ]; then
+        docker exec "$BENCH_CONTAINER" "$@"
+    else
+        "$@"
+    fi
+}
+
+# Extract $zip into $outdir with 7za on the staging side. The CDVL zip's
+# non-standard header makes 7za print a warning and exit 1; that's harmless, so
+# callers tolerate exit 1 and only treat >=2 as a hard failure. Exit 127 means
+# no 7za on the staging side.
+sevenz_x() {
+    local zip="$1" outdir="$2"
+    if ! stage_run bash -c 'command -v 7za >/dev/null 2>&1'; then
+        cat >&2 <<EOF
+ERROR: 7za not available on the staging side (STAGE_MODE=${STAGE_MODE}).
+The CDVL zip has a non-standard header; unzip rejects it but 7za tolerates it.
+Easiest fix: start the bench container (its Dockerfile bakes in p7zip), re-run:
+      ${DOCKER_DIR}/../dcperf.sh videotranscode setup
+      ${BASH_SOURCE[0]}
+Or install on the host:  sudo dnf install -y p7zip p7zip-plugins
+EOF
+        return 127
+    fi
+    stage_run 7za x -y -o"$(spath "$outdir")" "$(spath "$zip")"
+}
+
+# Move every *.y4m anywhere under $tmp into $cuts, then rm -rf $tmp -- all on
+# the staging side, so the side that owns the freshly-extracted files (root in
+# container mode) is also the one that mv/rm's them. If $force=1, wipe any
+# pre-existing y4m in $cuts first. Echoes the number of files moved.
 finalize_extract() {
     local tmp="$1" cuts="$2" force="$3"
-    if [ "$EXTRACT_MODE" = "container" ]; then
-        local tmp_c="${tmp/#$DCPERF_ROOT/\/DCPerf}"
-        local cuts_c="${cuts/#$DCPERF_ROOT/\/DCPerf}"
-        # Single docker exec: cheaper than per-file. Print the moved count on
-        # the last line so the caller can grab it.
-        docker exec "$BENCH_CONTAINER" bash -c "
-            set -e
-            mkdir -p '$cuts_c'
-            if [ '$force' = '1' ]; then
-                find '$cuts_c' -maxdepth 1 -name '*.y4m' -delete 2>/dev/null || true
-            fi
-            moved=0
-            while IFS= read -r -d '' f; do
-                mv -n \"\$f\" '$cuts_c/' && moved=\$((moved + 1)) || true
-            done < <(find '$tmp_c' -name '*.y4m' -print0)
-            rm -rf '$tmp_c'
-            echo \"MOVED=\$moved\"
-        " | awk -F= '/^MOVED=/ {print $2}'
-    else
+    stage_run bash -c '
+        set -e
+        cuts="$1"; tmp="$2"; force="$3"
         mkdir -p "$cuts"
         if [ "$force" = 1 ]; then
-            find "$cuts" -maxdepth 1 -name '*.y4m' -delete 2>/dev/null || true
+            find "$cuts" -maxdepth 1 -name "*.y4m" -delete 2>/dev/null || true
         fi
-        local moved=0
-        while IFS= read -r -d '' f; do
-            mv -n "$f" "$cuts/" && moved=$((moved + 1))
-        done < <(find "$tmp" -name '*.y4m' -print0)
+        moved=0
+        while IFS= read -r -d "" f; do
+            mv -n "$f" "$cuts/" && moved=$((moved + 1)) || true
+        done < <(find "$tmp" -name "*.y4m" -print0)
         rm -rf "$tmp"
-        echo "$moved"
-    fi
+        echo "MOVED=$moved"
+    ' _ "$(spath "$cuts")" "$(spath "$tmp")" "$force" \
+        | awk -F= '/^MOVED=/ {print $2}'
 }
 
 check_free_space() {
     local target="$1" avail_kb avail_gb
-    mkdir -p "$target"
-    avail_kb=$(df -P "$target" | awk 'NR==2 {print $4}')
+    stage_run mkdir -p "$(spath "$target")"
+    avail_kb=$(stage_run df -P "$(spath "$target")" | awk 'NR==2 {print $4}')
     avail_gb=$(( avail_kb / 1024 / 1024 ))
     if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
         echo "ERROR: only ${avail_gb} GB free at ${target}, need >= ${MIN_FREE_GB} GB" >&2
@@ -162,40 +174,47 @@ check_free_space() {
 # Don't try to guess completeness from local size+magic; that's what caused
 # a 4.8 GB partial to be mistaken for a finished 24 GB download.
 download_zip() {
-    local url="$1" out="$2"
-    mkdir -p "$(dirname "$out")"
+    local url="$1" out="$2" out_s
+    out_s="$(spath "$out")"
+    stage_run mkdir -p "$(spath "$(dirname "$out")")"
     check_free_space "$(dirname "$out")"
 
     echo "==> fetching $url"
     echo "    -> $out (wget -c resumes if partial)"
-    if command -v wget >/dev/null 2>&1; then
-        wget -c --tries=3 --read-timeout=60 -O "$out" "$url"
-    elif command -v curl >/dev/null 2>&1; then
-        curl -L --fail --retry 3 --retry-delay 5 -C - -o "$out" "$url"
+    # Tolerate a non-zero exit from the downloader (|| true): a dead CDVL link
+    # 404s, and under `set -e` that would abort here before the size/magic
+    # checks below can print the actionable "link may have expired" guidance.
+    if stage_run bash -c 'command -v wget >/dev/null 2>&1'; then
+        stage_run wget -c --tries=3 --read-timeout=60 -O "$out_s" "$url" || true
+    elif stage_run bash -c 'command -v curl >/dev/null 2>&1'; then
+        stage_run curl -L --fail --retry 3 --retry-delay 5 -C - -o "$out_s" "$url" || true
     else
-        echo "ERROR: neither wget nor curl available" >&2
+        echo "ERROR: neither wget nor curl available on the staging side" >&2
         exit 1
     fi
 
     # Post-download sanity. Login-page redirects are typically <100 KB HTML;
-    # the real zip is ~24 GB. Anything under 1 GB is suspect.
-    if [ ! -f "$out" ] || [ "$(stat -c %s "$out")" -lt 1073741824 ]; then
+    # the real zip is ~24 GB. Anything under 1 GB is suspect. stat returns 0
+    # for a missing file, which trips the same guard.
+    local size magic
+    size=$(stage_run stat -c %s "$out_s" 2>/dev/null || echo 0)
+    if [ "$size" -lt 1073741824 ]; then
         echo "ERROR: downloaded file is suspiciously small (<1 GB); CDVL link may have expired." >&2
         echo "       Get a fresh link from https://www.cdvl.org/ (search for" >&2
         echo "       'ElFuente Shots for SI/TI') and pass it as the first arg." >&2
         exit 1
     fi
-    local magic
-    magic=$(head -c 2 "$out" | tr -d '\0' || true)
+    magic=$(stage_run bash -c "head -c 2 '$out_s' | tr -d '\0'" || true)
     if [ "$magic" != "PK" ]; then
         echo "ERROR: downloaded file is not a zip (magic '$magic'). Likely a login redirect." >&2
         exit 1
     fi
-    echo "==> have zip: $(du -h "$out" | cut -f1)"
+    echo "==> have zip: $(stage_run du -h "$out_s" | cut -f1)"
 }
 
 cmd_stage() {
     local force="$1" zip_or_url="$2"
+    pick_stage_mode
 
     local zip
     if [ -z "$zip_or_url" ]; then
@@ -233,7 +252,7 @@ cmd_stage() {
         return 0
     fi
 
-    echo "==> staging dataset from $(basename "$zip") ($(du -h "$zip" | cut -f1))"
+    echo "==> staging dataset from $(basename "$zip") ($(stage_run du -h "$(spath "$zip")" | cut -f1))"
     check_free_space "$CUTS_DIR"
 
     # Extract to a sibling tmp dir, then move y4m files into cuts/. Keeps the
@@ -241,7 +260,7 @@ cmd_stage() {
     # top-level cuts/ only, so nested dirs would be invisible.
     local tmp
     tmp="${DATASET_DIR}/.extract.$$"
-    mkdir -p "$tmp"
+    stage_run mkdir -p "$(spath "$tmp")"
     # README warns the zip header is malformed; 7za prints a warning but
     # extracts contents fine. Tolerate exit code 1 (warning), bail on >=2.
     set +e
@@ -249,7 +268,7 @@ cmd_stage() {
     local rc=$?
     set -e
     if [ "$rc" -ge 2 ]; then
-        rm -rf "$tmp"
+        stage_run rm -rf "$(spath "$tmp")"
         echo "ERROR: 7za failed with exit $rc; aborting" >&2
         exit 1
     fi
@@ -284,6 +303,7 @@ while :; do
 done
 
 if [ "$download_only" = 1 ]; then
+    pick_stage_mode
     url="${1:-$DEFAULT_URL}"
     download_zip "$url" "${DATASET_DIR}/${DEFAULT_ZIP_NAME}"
     exit 0
