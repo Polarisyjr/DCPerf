@@ -43,9 +43,28 @@ def get_system_memsize_gb():
     return meminfo["MemTotal"] / (1024**3)
 
 
+def get_ephemeral_port_budget():
+    """Number of usable local (ephemeral) ports for outbound connections.
+
+    A client opens every connection from the same source IP to one server
+    endpoint, so the count cannot exceed the local ephemeral port range. This
+    bites in standalone mode (client and server share a host over loopback):
+    overshooting yields EADDRNOTAVAIL ("Cannot assign requested address").
+    """
+    try:
+        with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+            lo, hi = (int(x) for x in f.read().split())
+        return max(hi - lo + 1, 1)
+    except (OSError, ValueError):
+        return 28000  # conservative default (matches a typical 32768-60999)
+
+
 def sanitize_clients_per_thread(val=380):
     ncores = len(os.sched_getaffinity(0))
-    max_clients_per_thread = MAX_CLIENT_CONN // ncores
+    # Cap total client connections by both the design limit and the actual
+    # ephemeral port range (with a safety margin for TIME_WAIT sockets).
+    max_conn = min(MAX_CLIENT_CONN, int(get_ephemeral_port_budget() * 0.9))
+    max_clients_per_thread = max(max_conn // ncores, 1)
     return min(val, max_clients_per_thread)
 
 

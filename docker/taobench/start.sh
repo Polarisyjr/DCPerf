@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Per-bench definition for tao_bench_standalone. Sourced by ../dcperf.sh.
 # Wraps DCPerf's standalone variant (server + clients on the same machine,
-# server NIC=lo). On a 256-LCPU / 690-GiB host the upstream defaults
-# (memsize=0 -> 75% of system memory ≈ 517 GB, warmup=5 * memsize ≈ 43 min)
-# are wasteful for an initial validation run, so bench_patch_jobs_yml below
-# rewrites the memsize var default to 128 GB (warmup clamps to the 1200 s
-# minimum, total bench ≈ 32 min).
+# server NIC=lo). The upstream default memsize=0 means "75% of system
+# memory", and warmup time scales with memsize (~10 s/GB): on this 1.7 TiB
+# host that auto-resolves to ~664 GB and a ~110 min warmup, which is wasteful
+# for a validation run. BENCH_RUN_ARGS below pins memsize=128 GB so warmup
+# clamps to the 1200 s (20 min) minimum (total bench ≈ 32 min). Override at
+# run time with e.g. `-i '{"memsize":256,"test_time":540}'`.
 
 BENCH_JOB="tao_bench_standalone"
 # tao_bench_client is the LAST binary copied into BENCHPRESS_ROOT/benchmarks/
@@ -14,14 +15,20 @@ BENCH_JOB="tao_bench_standalone"
 # from the patched memcached tree; both must exist to run the bench, but
 # the client landing means the install actually ran to completion.
 BENCH_INSTALL_PROBE="/DCPerf/benchmarks/tao_bench/tao_bench_client"
-BENCH_RUN_ARGS=()
+# Run-time overrides (dcperf.sh passes these straight to `benchpress_cli.py
+# run`; benchpress -i merges over the job's vars, so test_time=720 s stays):
+#   memsize=128   - pin to 128 GB so warmup clamps to ~20 min instead of the
+#                   memsize=0 auto-default (~664 GB / ~110 min on this 1.7 TiB host).
+#   disable_tls=1 - the bundled example.crt/key (2022) fail the TLS handshake
+#                   against the OpenSSL 3.3.2 built here ("TLS connection error:
+#                   (null)"), which yields 0 QPS. Plaintext is the only working
+#                   transport on this host. (See also the run_standalone.py patch
+#                   that forces server_hostname=127.0.0.1: "localhost" resolves to
+#                   ::1 first and IPv6 is disabled here.)
+# Override at run time, e.g. `./docker/dcperf.sh taobench bench -i '{"memsize":256}'`.
+BENCH_RUN_ARGS=(-i '{"memsize":128,"disable_tls":1}')
 BENCH_INSTALL_ETA="builds OpenSSL 3.3.2 + libevent + folly (huge) + memcached + memtier_benchmark from source; ~25-50 min"
-# Upstream default: memsize=0 -> 75% of system memory; on a 690 GiB host
-# that's ~517 GB which bloats warmup to ~43 min. Pass `-i '{"memsize":N}'`
-# to override at run time, e.g.:
-#   ./docker/dcperf.sh taobench bench -i '{"memsize":128}'
-#   ./docker/dcperf.sh taobench bench -i '{"memsize":256,"test_time":540}'
-BENCH_RUN_ETA="upstream defaults; on this host ~55 min total (warmup ~43 min + test 12 min). Override memsize with -i '{\"memsize\":N}'."
+BENCH_RUN_ETA="memsize pinned to 128 GB: ~32 min total (warmup ~20 min + test 12 min)."
 
 # Inject the `perf` hook bundle ahead of the default copymove hook for the
 # tao_bench_standalone entry (same 10-monitor bundle feedsim_autoscale /

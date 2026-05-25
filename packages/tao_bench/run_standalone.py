@@ -199,7 +199,12 @@ if __name__ == "__main__":
     if args.warmup_time == 0:
         args.warmup_time = args_utils.get_warmup_time(args)
     args.server_memsize = args.memsize
-    args.server_hostname = "localhost"
+    # Use the IPv4 loopback literal rather than "localhost": on hosts with IPv6
+    # disabled but "::1 localhost" still in /etc/hosts, the client's
+    # getaddrinfo("localhost") returns ::1 first and socket(AF_INET6) fails with
+    # EAFNOSUPPORT ("Address family not supported by protocol"), aborting the
+    # client with 0 QPS. 127.0.0.1 is unambiguous and correct for standalone.
+    args.server_hostname = "127.0.0.1"
 
     t_server = threading.Thread(
         target=launch_server,
