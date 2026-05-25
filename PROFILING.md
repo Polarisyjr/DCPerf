@@ -12,18 +12,25 @@
 
 ### perf — hardware counters
 
+PMU-based (require hardware performance counters):
+
 - **Topdown breakdown**: frontend / backend / retiring / bad speculation
 - **IPC**
-- **CPU utilization**
-- **Power**
-- **Memory bandwidth utilization**
 - **Cache / TLB / Branch MPKIs**
-  - L1-D, L1-I, L2, LLC
+  - L1-D, L1-I, L2
+  <!-- - LLC -->
   - L1-DTLB, L1-ITLB, L2-TLB
   - BP (branch predictor), BTB
+
+Software events (no PMU required):
+
+- **CPU utilization**
 - **Context switches per kilo instructions** — `ctxsw` monitor counts
-  context switches (software event, no PMU); per-kI is derived from
+  context switches (software event); per-kI is derived from
   `perfstat` or PerfSpect3 instructions in post-processing.
+
+<!-- - **Power**
+- **Memory bandwidth utilization** -->
 
 ### eBPF — OS-level behavior
 

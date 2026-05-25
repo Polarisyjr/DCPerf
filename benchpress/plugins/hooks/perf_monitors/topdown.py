@@ -118,6 +118,10 @@ def get_amd_zen_generation(cpuinfo: dict):
             if model in model_name:
                 return "zen5"
         return "zen5es"
+    elif cpu_family == "23":
+        # Family 17h (Zen/Zen+/Zen2, e.g. EPYC "Rome"). Uses a trimmed,
+        # core-PMU-only profile so it also works on VMs with no uncore PMU.
+        return "zen2"
     else:
         return "zen3"
 
@@ -372,6 +376,14 @@ class AMDPerfUtil:
                 perf_collect_script_name="collect_amd_zen5_perf_counters.sh",
                 perf_postproc_script_name="generate_amd_perf_report.py",
                 perf_postproc_args=["--arch", "zen5es"],
+            )
+        elif self.amd_gen == "zen2":
+            self.perfutil = BasePerfUtil(
+                job_uuid,
+                "amd-zen2-perf-collector",
+                perf_collect_script_name="collect_amd_zen2_perf_counters.sh",
+                perf_postproc_script_name="generate_amd_perf_report.py",
+                perf_postproc_args=["--arch", "zen2"],
             )
 
     def run(self):

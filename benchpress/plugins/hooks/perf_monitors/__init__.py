@@ -203,4 +203,50 @@ def load_instructions_per_interval(metrics_dir):
     out = _read_csv_instructions_column(pspect, _PERFSPECT_INST_COLUMNS)
     if out:
         return out
+    # AMD fallback: when PerfStat is disabled (e.g. the zen2 collector
+    # already counts instructions+cycles), recover per-interval
+    # instructions from the AMD collector's raw per-socket log.
+    out = _read_amd_collector_instructions(metrics_dir)
+    if out:
+        return out
+    return None
+
+
+def _read_amd_collector_instructions(metrics_dir):
+    """Per-interval instructions from a raw AMD top-down collector log
+    (`amd-*perf-collector.log`, the per-socket `perf stat -x,` output).
+    Sums the `instructions` event across sockets for each interval and
+    returns one value per interval in chronological (file) order, or
+    None if no such log/event is present.
+    """
+    try:
+        names = [
+            n
+            for n in os.listdir(metrics_dir)
+            if n.startswith("amd-") and n.endswith("perf-collector.log")
+        ]
+    except OSError:
+        return None
+    for name in sorted(names):
+        per_ts = {}
+        order = []
+        try:
+            with open(os.path.join(metrics_dir, name), newline="") as f:
+                for row in csv.reader(f):
+                    # cols: ts,socket,numcpus,value,unit,event,runtime,pct,...
+                    if len(row) < 6 or row[5] != "instructions":
+                        continue
+                    ts = row[0]
+                    try:
+                        val = float(row[3])
+                    except (TypeError, ValueError):
+                        continue
+                    if ts not in per_ts:
+                        per_ts[ts] = 0.0
+                        order.append(ts)
+                    per_ts[ts] += val
+        except OSError:
+            continue
+        if order:
+            return [per_ts[ts] for ts in order]
     return None

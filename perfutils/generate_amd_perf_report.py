@@ -180,6 +180,113 @@ def backend_stalls(grouped_df):
     return {"name": "Backend Stalls", "series": stalled_cycles_be_series, "prefix": 100}
 
 
+# --- Zen2 (Family 17h) top-down level-1 ------------------------------------
+# Slot-based decomposition that sums to exactly 100% by construction. All inputs
+# come from the dedicated, co-scheduled TOPDOWN_L1_GROUP in
+# collect_amd_zen2_perf_counters.sh (one 6-PMC group, no multiplexing), so the
+# ratios are skew-free:
+#   Retiring  = retired ops / (W * cycles)            [W = 6 = Zen2 dispatch width]
+#   BadSpec   = (dispatched - retired ops) / (W * cycles)   [dispatched, then flushed]
+# The remaining "no-dispatch" slots are the exact deficit  no_dispatch = W*cycles
+# - dispatched. Zen2 has no per-slot frontend/backend stall event (Zen5 does:
+# de_no_dispatch_per_slot.*), only whole-cycle stall counters, so we apportion
+# that deficit between FE and BE *weighted by their stall-cycle ratio*:
+#   Frontend  = no_dispatch * opq/(opq+tok)  / (W*cycles)  [0xA9: frontend empty]
+#   Backend   = no_dispatch * tok/(opq+tok)  / (W*cycles)  [0xAE+0xAF: dispatch blocked]
+# Anchoring to the exact slot deficit (instead of raw op-queue-empty / token-stall
+# cycle fractions) is what makes the four buckets close to 100%: it folds the
+# partial-issue cycles -- which a pure cycle count misses (undershoot) or
+# double-counts against retiring (overshoot) -- into whichever stall dominates.
+ZEN2_DISPATCH_WIDTH = 6
+
+
+@skip_if_missing
+def zen2_frontend_bound_pct(grouped_df):
+    cyc = grouped_df.get_group("td_cycles").counter_value.astype("float")
+    disp = grouped_df.get_group("td_dispatched_ops").counter_value.astype("float")
+    opq = grouped_df.get_group("td_op_queue_empty").counter_value.astype("float")
+    tok1 = grouped_df.get_group("td_token_stall_part1").counter_value.astype("float")
+    tok2 = grouped_df.get_group("td_token_stall_part2").counter_value.astype("float")
+    disp.index = cyc.index
+    opq.index = cyc.index
+    tok1.index = cyc.index
+    tok2.index = cyc.index
+    slots = ZEN2_DISPATCH_WIDTH * cyc
+    no_dispatch = (slots - disp).clip(lower=0)
+    fe_share = opq.div(opq + tok1 + tok2).fillna(0.0)
+    return {"name": "Frontend Bound %", "series": no_dispatch * fe_share / slots * 100}
+
+
+@skip_if_missing
+def zen2_backend_bound_pct(grouped_df):
+    cyc = grouped_df.get_group("td_cycles").counter_value.astype("float")
+    disp = grouped_df.get_group("td_dispatched_ops").counter_value.astype("float")
+    opq = grouped_df.get_group("td_op_queue_empty").counter_value.astype("float")
+    tok1 = grouped_df.get_group("td_token_stall_part1").counter_value.astype("float")
+    tok2 = grouped_df.get_group("td_token_stall_part2").counter_value.astype("float")
+    disp.index = cyc.index
+    opq.index = cyc.index
+    tok1.index = cyc.index
+    tok2.index = cyc.index
+    slots = ZEN2_DISPATCH_WIDTH * cyc
+    no_dispatch = (slots - disp).clip(lower=0)
+    be_share = (tok1 + tok2).div(opq + tok1 + tok2).fillna(0.0)
+    return {"name": "Backend Bound %", "series": no_dispatch * be_share / slots * 100}
+
+
+@skip_if_missing
+def zen2_retiring_pct(grouped_df):
+    cyc = grouped_df.get_group("td_cycles").counter_value.astype("float")
+    ret = grouped_df.get_group("td_retired_ops").counter_value.astype("float")
+    ret.index = cyc.index
+    return {"name": "Retiring %", "series": ret.div(cyc * ZEN2_DISPATCH_WIDTH) * 100}
+
+
+@skip_if_missing
+def zen2_bad_speculation_pct(grouped_df):
+    cyc = grouped_df.get_group("td_cycles").counter_value.astype("float")
+    ret = grouped_df.get_group("td_retired_ops").counter_value.astype("float")
+    disp = grouped_df.get_group("td_dispatched_ops").counter_value.astype("float")
+    ret.index = cyc.index
+    disp.index = cyc.index
+    series = (disp - ret).div(cyc * ZEN2_DISPATCH_WIDTH) * 100
+    return {"name": "Bad Speculation %", "series": series}
+
+
+@skip_if_missing
+def zen2_cpu_utilization_pct(grouped_df):
+    mperf = grouped_df.get_group("mperf").counter_value.astype("float")
+    tsc = grouped_df.get_group("tsc").counter_value.astype("float")
+    mperf.index = tsc.index
+    return {"name": "CPU Utilization %", "series": mperf.div(tsc) * 100}
+
+
+@skip_if_missing
+def zen2_bp_mpki(grouped_df):
+    inst = grouped_df.get_group("instructions").counter_value.astype("float")
+    mispred = grouped_df.get_group("retired_branch_mispred").counter_value.astype(
+        "float"
+    )
+    mispred.index = inst.index
+    return {
+        "name": "Branch Mispred MPKI",
+        "series": mispred.div(inst),
+        "prefix": 1000,
+    }
+
+
+@skip_if_missing
+def zen2_btb_mpki(grouped_df):
+    inst = grouped_df.get_group("instructions").counter_value.astype("float")
+    btb = grouped_df.get_group("bp_l2_btb_correct").counter_value.astype("float")
+    btb.index = inst.index
+    return {
+        "name": "BTB Correction MPKI",
+        "series": btb.div(inst),
+        "prefix": 1000,
+    }
+
+
 @skip_if_missing
 def branch_mispred_rate(grouped_df):
     retired_branches = grouped_df.get_group("retired_branch_instructions").counter_value
@@ -2414,7 +2521,7 @@ def get_memory_info():
 @click.option(
     "-a",
     "--arch",
-    type=click.Choice(["zen3", "zen4", "zen5", "zen5es"]),
+    type=click.Choice(["zen2", "zen3", "zen4", "zen5", "zen5es"]),
     default="zen3",
     help="Specify which AMD architecture to aggregate counters correctly.",
 )
@@ -2537,6 +2644,35 @@ def main(
                 zen5es_total_cxl_read_bw_mbs(grouped_df),
                 zen5es_total_cxl_write_bw_mbs(grouped_df),
             ]
+    elif arch == "zen2":
+        # Trimmed, core-PMU-only profile (no uncore => no LLC) matching the
+        # PROFILING.md metric list. Inputs collected by
+        # collect_amd_zen2_perf_counters.sh. Missing events are skipped.
+        metrics = [
+            timestamp(grouped_df),
+            mips(grouped_df),
+            ipc(grouped_df),
+            zen2_cpu_utilization_pct(grouped_df),
+            # top-down level-1 (adds up to ~100%)
+            zen2_frontend_bound_pct(grouped_df),
+            zen2_backend_bound_pct(grouped_df),
+            zen2_retiring_pct(grouped_df),
+            zen2_bad_speculation_pct(grouped_df),
+            # cache MPKIs
+            l1_dcache_mpki(grouped_df),
+            l1_icache_mpki(grouped_df),
+            l2_code_mpki(grouped_df),
+            l2_data_mpki(grouped_df),
+            # TLB MPKIs
+            itlb_mpki(grouped_df),
+            dtlb_mpki(grouped_df),
+            l2_itlb_mpki(grouped_df),
+            l2_dtlb_mpki(grouped_df),
+            # branch predictor / BTB
+            branch_mispred_rate(grouped_df),
+            zen2_bp_mpki(grouped_df),
+            zen2_btb_mpki(grouped_df),
+        ]
     else:
         metrics = [
             timestamp(grouped_df),

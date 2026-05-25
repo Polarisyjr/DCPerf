@@ -90,6 +90,20 @@ class Perf(Hook):
                         "Disabling PerfStat to avoid conflict with IntelPerfSpect3"
                     )
                     should_run_perf_stat = False
+                # The zen2 top-down collector already counts instructions+cycles
+                # in its own groups; running PerfStat as a second perf session
+                # only steals 2 PMCs and pushes the zen2 groups from 4 to ~6
+                # multiplexing waves. Disable it (per-kI derivations fall back to
+                # the AMD collector log via load_instructions_per_interval).
+                if (
+                    isinstance(monitor, topdown.AMDPerfUtil)
+                    and getattr(monitor, "amd_gen", None) == "zen2"
+                ):
+                    logger.info(
+                        "Disabling PerfStat: zen2 top-down collector already "
+                        "counts instructions+cycles (frees 2 PMCs for its TMA groups)"
+                    )
+                    should_run_perf_stat = False
                 self.monitors.append(monitor)
             except Exception as e:
                 logger.warning(
