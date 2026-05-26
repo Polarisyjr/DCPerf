@@ -75,10 +75,10 @@ cmd_check() {
 # install creates benchmarks/video_transcode_bench/ inside the container
 # through the /DCPerf bind mount, so the host user can't mkdir/wget/extract
 # into datasets/. Run every write-side step (mkdir, free-space check, download,
-# extract, move) wherever it can actually write. Prefer the container: it's
-# root on the same bind mount and its Dockerfile bakes in wget + curl + p7zip.
+# extract) wherever it can actually write. Prefer the container: it's root on
+# the same bind mount and has wget + curl + python3 (benchpress runs on it).
 # Fall back to the host only when the container isn't running (then the host
-# itself needs write access to DATASET_DIR and its own 7za).
+# itself needs write access to DATASET_DIR and its own python3).
 STAGE_MODE=""
 pick_stage_mode() {
     [ -n "$STAGE_MODE" ] && return 0
@@ -112,46 +112,41 @@ stage_run() {
     fi
 }
 
-# Extract $zip into $outdir with 7za on the staging side. The CDVL zip's
-# non-standard header makes 7za print a warning and exit 1; that's harmless, so
-# callers tolerate exit 1 and only treat >=2 as a hard failure. Exit 127 means
-# no 7za on the staging side.
-sevenz_x() {
-    local zip="$1" outdir="$2"
-    if ! stage_run bash -c 'command -v 7za >/dev/null 2>&1'; then
-        cat >&2 <<EOF
-ERROR: 7za not available on the staging side (STAGE_MODE=${STAGE_MODE}).
-The CDVL zip has a non-standard header; unzip rejects it but 7za tolerates it.
-Easiest fix: start the bench container (its Dockerfile bakes in p7zip), re-run:
-      ${DOCKER_DIR}/../dcperf.sh videotranscode setup
-      ${BASH_SOURCE[0]}
-Or install on the host:  sudo dnf install -y p7zip p7zip-plugins
-EOF
+# Extract every *.y4m entry from $zip directly into $cuts (flattening the zip's
+# frames_y4m/ wrapper -- DCPerf's run.sh enumerates the top level of cuts/ only)
+# on the staging side. Uses python3's zipfile: it reads this CDVL archive's
+# Zip64 central directory cleanly in seconds, whereas the centos9 image's
+# ancient p7zip 16.02 reports a bogus "Headers Error" and then spins at 90% CPU
+# producing zero output. The python code is passed via `python3 -c` (argv, not
+# a stdin heredoc) so it works through `docker exec` without needing -i.
+# If $force=1, clears any existing y4m first. Echoes the number extracted.
+extract_y4m() {
+    local zip="$1" cuts="$2" force="$3"
+    if ! stage_run bash -c 'command -v python3 >/dev/null 2>&1'; then
+        echo "ERROR: python3 not available on the staging side (STAGE_MODE=${STAGE_MODE})" >&2
         return 127
     fi
-    stage_run 7za x -y -o"$(spath "$outdir")" "$(spath "$zip")"
-}
-
-# Move every *.y4m anywhere under $tmp into $cuts, then rm -rf $tmp -- all on
-# the staging side, so the side that owns the freshly-extracted files (root in
-# container mode) is also the one that mv/rm's them. If $force=1, wipe any
-# pre-existing y4m in $cuts first. Echoes the number of files moved.
-finalize_extract() {
-    local tmp="$1" cuts="$2" force="$3"
-    stage_run bash -c '
-        set -e
-        cuts="$1"; tmp="$2"; force="$3"
-        mkdir -p "$cuts"
-        if [ "$force" = 1 ]; then
-            find "$cuts" -maxdepth 1 -name "*.y4m" -delete 2>/dev/null || true
-        fi
-        moved=0
-        while IFS= read -r -d "" f; do
-            mv -n "$f" "$cuts/" && moved=$((moved + 1)) || true
-        done < <(find "$tmp" -name "*.y4m" -print0)
-        rm -rf "$tmp"
-        echo "MOVED=$moved"
-    ' _ "$(spath "$cuts")" "$(spath "$tmp")" "$force" \
+    local py='
+import sys, os, zipfile, shutil
+zip_path, cuts, force = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(cuts, exist_ok=True)
+if force == "1":
+    for f in os.listdir(cuts):
+        if f.lower().endswith(".y4m"):
+            os.remove(os.path.join(cuts, f))
+n = 0
+with zipfile.ZipFile(zip_path) as z:
+    for info in z.infolist():
+        name = info.filename
+        if name.endswith("/") or not name.lower().endswith(".y4m"):
+            continue
+        dest = os.path.join(cuts, os.path.basename(name))
+        with z.open(info) as src, open(dest, "wb") as out:
+            shutil.copyfileobj(src, out, 1 << 20)
+        n += 1
+print("MOVED=%d" % n)
+'
+    stage_run python3 -c "$py" "$(spath "$zip")" "$(spath "$cuts")" "$force" \
         | awk -F= '/^MOVED=/ {print $2}'
 }
 
@@ -255,28 +250,11 @@ cmd_stage() {
     echo "==> staging dataset from $(basename "$zip") ($(stage_run du -h "$(spath "$zip")" | cut -f1))"
     check_free_space "$CUTS_DIR"
 
-    # Extract to a sibling tmp dir, then move y4m files into cuts/. Keeps the
-    # zip's frames_y4m/ wrapper out of cuts/ -- DCPerf's run.sh enumerates the
-    # top-level cuts/ only, so nested dirs would be invisible.
-    local tmp
-    tmp="${DATASET_DIR}/.extract.$$"
-    stage_run mkdir -p "$(spath "$tmp")"
-    # README warns the zip header is malformed; 7za prints a warning but
-    # extracts contents fine. Tolerate exit code 1 (warning), bail on >=2.
-    set +e
-    sevenz_x "$zip" "$tmp"
-    local rc=$?
-    set -e
-    if [ "$rc" -ge 2 ]; then
-        stage_run rm -rf "$(spath "$tmp")"
-        echo "ERROR: 7za failed with exit $rc; aborting" >&2
-        exit 1
-    fi
-
+    echo "==> extracting y4m entries with python zipfile ..."
     local moved
-    moved=$(finalize_extract "$tmp" "$CUTS_DIR" "$force")
+    moved=$(extract_y4m "$zip" "$CUTS_DIR" "$force")
     if [ -z "$moved" ] || [ "$moved" -eq 0 ]; then
-        echo "ERROR: zip extracted but no .y4m files found inside; check zip contents" >&2
+        echo "ERROR: no .y4m entries extracted from the zip; check zip contents" >&2
         exit 1
     fi
     echo "==> staged ${moved} y4m file(s) into ${CUTS_DIR}"
