@@ -67,6 +67,25 @@ if n == 0:
 p.write_text(s.replace(block, new_block, 1))
 print('jobs.yml: inserted perf hook into tao_bench_standalone')
 PYEOF
+    _fix_tao_hostname_ipv6
+}
+
+# run_standalone.py hardcodes `args.server_hostname = "localhost"`. On IPv6-off
+# hosts getaddrinfo("localhost") returns ::1 first and the client's
+# socket(AF_INET6) fails (EAFNOSUPPORT) -> 0 QPS. Pin it to the IPv4 literal.
+# Mirrors docker/mediawiki/start.sh's _strip_nginx_ipv6 and
+# docker/djangobench/start.sh's _fix_uwsgi_ipv6: the upstream package stays
+# pristine in git; this re-applies the fix in-container on every run. Idempotent
+# (no-op once already 127.0.0.1). NOTE: unlike the mediawiki/django hooks (which
+# edit untracked deployed files), run_standalone.py is the tracked package
+# source with no separate runtime copy, so a run leaves it modified in git
+# status; `git checkout` restores upstream and the next run re-applies.
+_fix_tao_hostname_ipv6() {
+    local f=/DCPerf/packages/tao_bench/run_standalone.py
+    docker exec "$BENCH_CONTAINER" test -f "$f" 2>/dev/null || return 0
+    docker exec "$BENCH_CONTAINER" sed -i \
+        's/args.server_hostname = "localhost"/args.server_hostname = "127.0.0.1"/' "$f"
+    echo "run_standalone.py: pinned server_hostname=127.0.0.1 (host has IPv6 off)"
 }
 
 # Upstream cleanup_tao_bench.sh just rm -rf's benchmarks/tao_bench. Same

@@ -51,6 +51,32 @@ if n == 0:
 p.write_text(s.replace(block, new_block, 1))
 print('jobs.yml: inserted perf hook into oss_performance_mediawiki_mlp')
 PYEOF
+    # oss-performance may already be installed here (short-circuit path); if so,
+    # fix its nginx template now. On a fresh install it doesn't exist yet --
+    # bench_post_install handles that case after the install creates it.
+    _strip_nginx_ipv6
+}
+
+# nginx.conf.in (installed from 0001-oss-performance-scalable-hhvm.diff) listens
+# on `[::]` (IPv6) for both the HTTP and admin ports. On hosts with IPv6
+# disabled (no /proc/net/if_inet6) nginx aborts at startup with
+#   socket() [::]:<port> failed (97: Address family not supported by protocol)
+# which fails the whole mediawiki run before any request is served. Drop the
+# IPv6 listen lines; the paired IPv4 `listen <port>` lines right below them keep
+# the bench working. Idempotent: the delete is a no-op once the lines are gone,
+# and it silently skips if oss-performance isn't laid down yet.
+_strip_nginx_ipv6() {
+    local nginx_in=/DCPerf/oss-performance/conf/nginx/nginx.conf.in
+    docker exec "$BENCH_CONTAINER" test -f "$nginx_in" 2>/dev/null || return 0
+    docker exec "$BENCH_CONTAINER" sed -i '/^[[:space:]]*listen[[:space:]]\[::\]:/d' "$nginx_in"
+    echo "nginx.conf.in: ensured no IPv6 'listen [::]' lines (host has IPv6 off)"
+}
+
+# Fresh installs create oss-performance/ during benchpress install, after
+# bench_patch_jobs_yml has already run -- so strip the IPv6 listen lines here,
+# once the template actually exists.
+bench_post_install() {
+    _strip_nginx_ipv6
 }
 
 # Skip cleanup_oss_performance_mediawiki.sh's `systemctl stop mariadb` -- the
