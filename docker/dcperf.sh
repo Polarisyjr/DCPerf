@@ -22,6 +22,12 @@
 #   stop             stop container (keeps image)
 #   clean            remove container + image
 #   build            (re)build the image only
+#
+# Environment:
+#   DCPERF_RESERVE_CORES=N   reserve N host cores: setup pins the container to
+#                            the rest via `docker update --cpuset-cpus` so a
+#                            core-saturating bench can't starve the host
+#                            (e.g. the Azure guest-agent heartbeat). Default 0.
 
 set -euo pipefail
 
@@ -42,7 +48,7 @@ BENCH_RUN_ETA=""
 SAVED_GATES_FILE=""
 
 usage() {
-    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # --- Bench loading ---
@@ -65,6 +71,11 @@ load_bench() {
     BENCH_IMAGE="dcperf-${BENCH}:centos9"
     BENCH_CONTAINER="dcperf-${BENCH}"
     BENCH_RUN_ARGS=()
+    # Host cores to reserve (cpuset applied via docker update). Comes from the
+    # caller's environment, e.g. `DCPERF_RESERVE_CORES=8 ./dcperf.sh django all`;
+    # defaults to 0 (no reservation). Not baked per-bench so the sweep/operator
+    # controls it. start.sh may still override if a bench truly requires it.
+    BENCH_RESERVE_CORES="${DCPERF_RESERVE_CORES:-0}"
     # Reset callbacks to defaults; start.sh can redefine them.
     bench_patch_jobs_yml() { :; }
     bench_force_cleanup()  { :; }
@@ -99,6 +110,37 @@ require_container() {
     # to hardening defaults) + plain `start` would leave perf/bpftrace silently
     # degraded. Idempotent: no-op when already relaxed.
     relax_perf_paranoid
+}
+
+# Reserve BENCH_RESERVE_CORES host cores by pinning the container to the rest
+# via `docker update --cpuset-cpus`. Applied live to the running container (no
+# recreate, so in-container install state survives) and persisted in the
+# container's HostConfig across stop/start. The range is computed from the live
+# core count, not hardcoded, so it travels across machines. A bench with no
+# headroom (client+server+deps all in one container, oversubscribing every core)
+# can otherwise starve the Azure guest-agent heartbeat and get the VM hard-reset.
+apply_cpuset() {
+    local reserve="${BENCH_RESERVE_CORES:-0}" total last
+    # --all (not bare nproc) so a constrained affinity on the dispatcher itself
+    # can't undercount and skew the reserved range.
+    total=$(nproc --all)
+    if ! [ "${reserve}" -gt 0 ] 2>/dev/null; then
+        reserve=0
+    fi
+    if [ "${reserve}" -ge "${total}" ]; then
+        echo "    (DCPERF_RESERVE_CORES=${reserve} >= cores=${total}; ignoring, using all cores)" >&2
+        reserve=0
+    fi
+    # Authoritative each setup: reserve>0 pins to 0..(total-reserve-1); reserve=0
+    # restores all cores (clears any cpuset left from a previous reservation, so
+    # an unset env var reliably means "full machine").
+    last=$((total - reserve - 1))
+    docker update --cpuset-cpus="0-${last}" "${BENCH_CONTAINER}" >/dev/null
+    if [ "${reserve}" -gt 0 ]; then
+        echo "==> reserved ${reserve} host core(s): ${BENCH_CONTAINER} pinned to cpus 0-${last} of ${total}"
+    else
+        echo "==> no core reservation: ${BENCH_CONTAINER} may use all ${total} cores"
+    fi
 }
 
 # --- Perf gate management (save → relax → restore) ---
@@ -210,6 +252,7 @@ cmd_setup() {
             sleep infinity >/dev/null
     fi
 
+    apply_cpuset
     docker ps --filter "name=^${BENCH_CONTAINER}$"
 }
 
