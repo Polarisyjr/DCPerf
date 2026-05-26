@@ -249,7 +249,8 @@ def fig_mpki(times, data, out: str, bench: str):
     _save(fig, out, "fig2_mpki.png")
 
 
-def fig_cpu_ctxsw(times, data, metrics_dir: str, out: str, bench: str):
+def fig_cpu_ctxsw(times, data, metrics_dir: str, out: str, bench: str,
+                  start=None, end=None):
     fig, ax = plt.subplots(figsize=(10, 5.5))
     plotted = False
     if "CPU Utilization %" in data and not np.all(np.isnan(data["CPU Utilization %"])):
@@ -265,6 +266,7 @@ def fig_cpu_ctxsw(times, data, metrics_dir: str, out: str, bench: str):
     if ctx:
         t = clock_to_elapsed(ctx)
         y = col(ctx, "ctxsw_per_kI")
+        t, y = _crop_arr(t, start, end, y)
         ax2 = ax.twinx()
         ax2.plot(t, y, color="#c44e52", lw=1.4, label="ctxsw / kilo-instr")
         ax2.set_ylabel("context switches per kI", color="#c44e52")
@@ -282,7 +284,7 @@ def fig_cpu_ctxsw(times, data, metrics_dir: str, out: str, bench: str):
     _save(fig, out, "fig3_cpu_ctxsw.png")
 
 
-def fig_syscalls(metrics_dir: str, out: str, bench: str):
+def fig_syscalls(metrics_dir: str, out: str, bench: str, start=None, end=None):
     rows = read_csv(os.path.join(metrics_dir, "syscall-ebpf.derived.csv"))
     if not rows:
         print("  skip syscalls: no syscall-ebpf.derived.csv")
@@ -303,6 +305,8 @@ def fig_syscalls(metrics_dir: str, out: str, bench: str):
     if not stacks:
         print("  skip syscalls: no per-kI columns")
         return
+    cropped = _crop_arr(t, start, end, *stacks)
+    t, stacks = cropped[0], list(cropped[1:])
     fig, ax = plt.subplots(figsize=(10, 5.5))
     ax.stackplot(t, *stacks, labels=labels, colors=colors, alpha=0.85)
     ax.set_xlabel("Elapsed time (s)")
@@ -312,6 +316,34 @@ def fig_syscalls(metrics_dir: str, out: str, bench: str):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper right")
     _save(fig, out, "fig4_syscalls_per_kI.png")
+
+
+def _time_mask(t, start, end):
+    """Boolean mask selecting samples with start <= t <= end (None = open)."""
+    m = np.ones(len(t), dtype=bool)
+    if start is not None:
+        m &= t >= start
+    if end is not None:
+        m &= t <= end
+    return m
+
+
+def _crop_arr(t, start, end, *arrs):
+    """Crop a time axis and any number of parallel arrays to [start, end].
+    Each monitor uses its own elapsed origin (PMU Timestamp_Secs vs the
+    clock-derived ctxsw/syscall axes), which differ by only a few seconds, so
+    the same window applies cleanly to each figure's own axis."""
+    if start is None and end is None:
+        return (t, *arrs)
+    m = _time_mask(t, start, end)
+    return (t[m], *(np.asarray(a)[m] for a in arrs))
+
+
+def _crop_times_data(times, data, start, end):
+    if not len(times) or (start is None and end is None):
+        return times, data
+    m = _time_mask(times, start, end)
+    return times[m], {k: v[m] for k, v in data.items()}
 
 
 def _save(fig, out: str, name: str):
@@ -328,6 +360,13 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("metrics_dir", nargs="?", help="benchmark_metrics_* directory")
     ap.add_argument("-o", "--outdir", help="output dir (default: <metrics_dir>/plots)")
+    ap.add_argument("--start", type=float, default=None,
+                    help="crop: drop samples before this elapsed second "
+                         "(e.g. skip warmup/resize). Pick the cutoff yourself from "
+                         "the figures/run log -- there's no portable per-bench "
+                         "phase marker to auto-detect it.")
+    ap.add_argument("--end", type=float, default=None,
+                    help="crop: drop samples after this elapsed second")
     args = ap.parse_args()
 
     mdir = find_metrics_dir(args.metrics_dir)
@@ -358,17 +397,24 @@ def main():
                   "BTB Correction MPKI"]
         present = [c for c in wanted if c in rows[0]] if rows else []
         times, data = group_by_timestamp(rows, "Timestamp_Secs", present)
+        times, data = _crop_times_data(times, data, args.start, args.end)
         print(f"PMU series  : {os.path.basename(ts_path)} "
-              f"({len(times)} samples)")
+              f"({len(times)} samples"
+              f"{'' if args.start is None and args.end is None else ' after crop'})")
     else:
         print("PMU series  : none found")
+
+    if args.start is not None or args.end is not None:
+        lo = "0" if args.start is None else f"{args.start:g}"
+        hi = "end" if args.end is None else f"{args.end:g}"
+        print(f"window      : t={lo}-{hi}s")
 
     print("rendering figures:")
     if len(times):
         fig_topdown(times, data, out, bench)
         fig_mpki(times, data, out, bench)
-        fig_cpu_ctxsw(times, data, mdir, out, bench)
-    fig_syscalls(mdir, out, bench)
+        fig_cpu_ctxsw(times, data, mdir, out, bench, args.start, args.end)
+    fig_syscalls(mdir, out, bench, args.start, args.end)
     print("done.")
 
 

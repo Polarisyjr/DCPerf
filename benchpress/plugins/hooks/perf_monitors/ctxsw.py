@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 
-from . import load_instructions_per_interval, logger, Monitor
+from . import derive_per_kI, load_instructions_per_interval_ts, logger, Monitor
 
 
 class CtxSw(Monitor):
@@ -83,24 +83,26 @@ class CtxSw(Monitor):
         super(CtxSw, self).run()
 
     def post_process(self):
-        inst = load_instructions_per_interval(os.path.dirname(self.csvpath))
-        if not inst:
+        inst_ts = load_instructions_per_interval_ts(os.path.dirname(self.csvpath))
+        if not inst_ts:
             logger.info(
                 "ctxsw: no instructions source found (need perf-stat.csv or "
                 "topdown-intel.sys.csv); skipping per-kI derivation"
             )
             return
+        # Align by timestamp (not sample index). perf stat -I can stretch its
+        # interval under load, so pass each bucket's own elapsed stamp (the perf
+        # -I time in `interval`) rather than assuming a steady cadence.
+        bucket_times = [r.get("interval") for r in self.res]
+        rows = derive_per_kI(
+            self.res, inst_ts, self.interval, ("context_switches",),
+            bucket_times=bucket_times,
+        )
         derived_path = self.gen_path("ctxsw.derived.csv")
-        n = min(len(self.res), len(inst))
         with open(derived_path, "w") as f:
             f.write("index,timestamp,context_switches,instructions,ctxsw_per_kI\n")
-            for i in range(n):
-                cs = self.res[i].get("context_switches", 0.0)
-                ki = inst[i]
-                try:
-                    ratio = (cs / ki) * 1000.0 if ki > 0 else 0.0
-                except (TypeError, ZeroDivisionError):
-                    ratio = 0.0
+            for r in rows:
                 f.write(
-                    f"{i},{self.res[i]['timestamp']},{cs},{ki},{ratio}\n"
+                    f"{r['index']},{r['timestamp']},{r['context_switches']},"
+                    f"{r['instructions']},{r['context_switches_per_kI']}\n"
                 )

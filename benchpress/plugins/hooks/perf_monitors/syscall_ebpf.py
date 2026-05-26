@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 
-from . import load_instructions_per_interval, logger, Monitor
+from . import derive_per_kI, load_instructions_per_interval_ts, logger, Monitor
 
 
 # x86_64 syscall numbers grouped into four categories. The set is curated
@@ -153,41 +153,33 @@ class SyscallEBPF(Monitor):
         return rc
 
     def post_process(self):
-        inst = load_instructions_per_interval(os.path.dirname(self.csvpath))
-        if not inst:
+        inst_ts = load_instructions_per_interval_ts(os.path.dirname(self.csvpath))
+        if not inst_ts:
             logger.info(
                 "syscall_ebpf: no instructions source found (need "
                 "perf-stat.csv or topdown-intel.sys.csv); skipping per-kI "
                 "derivation"
             )
             return
-        derived_path = self.gen_path("syscall-ebpf.derived.csv")
-        n = min(len(self.res), len(inst))
         cats = ("fs", "mm", "thread", "net")
+        # Align by timestamp (not sample index) so the derived series spans the
+        # whole run even when the instruction collector sampled at a different /
+        # irregular cadence than this 5s-steady eBPF monitor.
+        rows = derive_per_kI(self.res, inst_ts, self.interval, cats)
+        derived_path = self.gen_path("syscall-ebpf.derived.csv")
         with open(derived_path, "w") as f:
-            header = (
+            f.write(
                 "index,timestamp,"
                 + ",".join(cats)
                 + ",instructions,"
                 + ",".join(f"{c}_per_kI" for c in cats)
                 + "\n"
             )
-            f.write(header)
-            for i in range(n):
-                row = self.res[i]
-                ki = inst[i]
-                counts = [row.get(c, 0) for c in cats]
-                ratios = []
-                for c in counts:
-                    try:
-                        r = (c / ki) * 1000.0 if ki > 0 else 0.0
-                    except (TypeError, ZeroDivisionError):
-                        r = 0.0
-                    ratios.append(r)
+            for r in rows:
                 f.write(
-                    f"{i},{row['timestamp']},"
-                    + ",".join(str(c) for c in counts)
-                    + f",{ki},"
-                    + ",".join(str(r) for r in ratios)
+                    f"{r['index']},{r['timestamp']},"
+                    + ",".join(str(r[c]) for c in cats)
+                    + f",{r['instructions']},"
+                    + ",".join(str(r[f"{c}_per_kI"]) for c in cats)
                     + "\n"
                 )
