@@ -54,14 +54,23 @@ def find_metrics_dir(explicit: str | None) -> str:
         if not os.path.isdir(explicit):
             sys.exit(f"error: {explicit} is not a directory")
         return os.path.realpath(explicit)
+    # Current layout: results/<bench>/ with CSVs inside (e.g. django_default,
+    # mediawiki_default). Legacy layout: top-level benchmark_metrics_<hash>/
+    # -- still picked up if present.
+    patterns = [
+        os.path.join(HERE, "results", "*"),
+        os.path.join(HERE, "benchmark_metrics_*"),
+    ]
     cands = []
-    for d in glob.glob(os.path.join(HERE, "benchmark_metrics_*")):
+    for d in (p for pat in patterns for p in glob.glob(pat)):
+        if not os.path.isdir(d) or "_discarded" in d:
+            continue
         d = os.path.realpath(d)
         if any(os.path.isfile(os.path.join(d, m)) for m in PROFILE_MARKERS):
             cands.append(d)
     if not cands:
-        sys.exit("error: no benchmark_metrics_* dir with profiling data found; "
-                 "pass one explicitly")
+        sys.exit("error: no metrics dir with profiling data found under "
+                 "results/* or benchmark_metrics_*; pass one explicitly")
     cands = sorted(set(cands), key=os.path.getmtime)
     return cands[-1]
 
