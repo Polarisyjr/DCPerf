@@ -204,7 +204,7 @@ if __name__ == "__main__":
     # getaddrinfo("localhost") returns ::1 first and socket(AF_INET6) fails with
     # EAFNOSUPPORT ("Address family not supported by protocol"), aborting the
     # client with 0 QPS. 127.0.0.1 is unambiguous and correct for standalone.
-    args.server_hostname = "localhost"
+    args.server_hostname = "127.0.0.1"
 
     t_server = threading.Thread(
         target=launch_server,
