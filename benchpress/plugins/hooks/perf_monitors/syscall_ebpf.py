@@ -134,11 +134,34 @@ class SyscallEBPF(Monitor):
                 + str(e)
             )
 
+    @staticmethod
+    def _bpftrace_supports_quiet():
+        """Whether the installed bpftrace accepts -q (quiet).
+
+        -q was added after the v0.9.x series shipped by older distros (e.g.
+        Ubuntu 20.04's bpftrace 0.9.4 rejects it with "invalid option -- 'q'").
+        It only suppresses the "Attaching N probes..." banner, which bpftrace
+        writes to stderr (captured separately below) and which the stdout parser
+        ignores anyway -- so when -q is unavailable we simply omit it.
+        """
+        try:
+            help_out = subprocess.run(
+                ["bpftrace", "--help"],
+                capture_output=True,
+                encoding="utf-8",
+            )
+            return "-q" in (help_out.stdout + help_out.stderr)
+        except OSError:
+            return False
+
     def run(self):
         self._idx = 0
         self._current = None
         script = _build_script(self.interval)
-        args = ["bpftrace", "-q", "-e", script]
+        args = ["bpftrace"]
+        if self._bpftrace_supports_quiet():
+            args.append("-q")
+        args += ["-e", script]
         self.proc = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
