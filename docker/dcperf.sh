@@ -28,6 +28,9 @@
 #                            the rest via `docker update --cpuset-cpus` so a
 #                            core-saturating bench can't starve the host
 #                            (e.g. the Azure guest-agent heartbeat). Default 0.
+#   BENCH_NETWORK=isolated|host|<docker-net>
+#                            container network policy. Default isolated
+#                            (Docker bridge). host must be explicit.
 #   DCPERF_LEAF_WAIT=N       feedsim-only: override LeafNodeRank warmup wait.
 #   DCPERF_PERF_RECORD=1     pass through to benchmarks that support perf.data.
 
@@ -47,6 +50,7 @@ BENCH_INSTALL_PROBE=""
 BENCH_RUN_ARGS=()
 BENCH_INSTALL_ETA=""
 BENCH_RUN_ETA=""
+BENCH_NETWORK=""
 SAVED_GATES_FILE=""
 
 if [ -n "${DOCKER_CMD:-}" ]; then
@@ -82,6 +86,7 @@ load_bench() {
     BENCH_IMAGE="dcperf-${BENCH}:centos9"
     BENCH_CONTAINER="dcperf-${BENCH}"
     BENCH_RUN_ARGS=()
+    BENCH_NETWORK="${BENCH_NETWORK:-isolated}"
     # Host cores to reserve (cpuset applied via docker update). Comes from the
     # caller's environment, e.g. `DCPERF_RESERVE_CORES=8 ./dcperf.sh django all`;
     # defaults to 0 (no reservation). Not baked per-bench so the sweep/operator
@@ -132,6 +137,44 @@ container_exec_env_args() {
             out+=("-e" "${name}=${!name}")
         fi
     done
+}
+
+container_network_mode() {
+    docker inspect -f '{{.HostConfig.NetworkMode}}' "${BENCH_CONTAINER}" 2>/dev/null || true
+}
+
+expected_network_mode() {
+    case "${BENCH_NETWORK:-isolated}" in
+        isolated|bridge|default|"") printf 'default\n' ;;
+        host) printf 'host\n' ;;
+        *) printf '%s\n' "${BENCH_NETWORK}" ;;
+    esac
+}
+
+docker_network_args() {
+    local mode
+    mode="$(expected_network_mode)"
+    case "$mode" in
+        default) : ;;
+        host) printf '%s\n' "--network=host" ;;
+        *) printf '%s\n' "--network=${mode}" ;;
+    esac
+}
+
+check_container_network_matches() {
+    local actual expected
+    actual="$(container_network_mode)"
+    expected="$(expected_network_mode)"
+    # Docker reports the default bridge as "default" for HostConfig.NetworkMode.
+    if [ "$actual" != "$expected" ]; then
+        cat >&2 <<EOF
+container ${BENCH_CONTAINER} has network mode '${actual}', expected '${expected}'.
+Network mode cannot be changed in place; run:
+  ./docker/dcperf.sh ${BENCH} clean
+  BENCH_NETWORK=${BENCH_NETWORK:-isolated} ./docker/dcperf.sh ${BENCH} setup
+EOF
+        exit 1
+    fi
 }
 
 # Reserve BENCH_RESERVE_CORES host cores by pinning the container to the rest
@@ -235,6 +278,7 @@ cmd_setup() {
     cmd_build
 
     if container_exists; then
+        check_container_network_matches
         if container_running; then
             echo "==> container ${BENCH_CONTAINER} already running"
         else
@@ -252,10 +296,17 @@ cmd_setup() {
         # monitors visibility into host pids; remove only if you want strict
         # container isolation (and accept that pkill/ps in bench scripts will
         # see only container processes).
+        local network_args=()
+        mapfile -t network_args < <(docker_network_args)
+        if [ "${#network_args[@]}" -gt 0 ]; then
+            echo "==> network mode: $(expected_network_mode)"
+        else
+            echo "==> network mode: isolated/default bridge"
+        fi
         docker run -d \
             --name "${BENCH_CONTAINER}" \
             --privileged \
-            --network=host \
+            "${network_args[@]}" \
             --pid=host \
             --ipc=host \
             --cap-add=SYS_ADMIN --cap-add=PERFMON --cap-add=SYS_PTRACE --cap-add=IPC_LOCK \
