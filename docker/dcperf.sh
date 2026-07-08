@@ -372,6 +372,19 @@ cmd_install() {
         "cd /DCPerf && ./benchpress_cli.py install ${bp_force} ${BENCH_JOB}" \
         2>&1 | tee "${log}"
 
+    # Network-mode migration recreates the container but keeps /DCPerf
+    # bind-mounted state. benchpress may therefore see benchmark_installs.txt
+    # and print "already installed" even though container-local binaries such
+    # as /usr/local/bin/siege are absent. If the probe is still missing after a
+    # nominal install, force exactly one reinstall.
+    if [ "${force}" = 0 ] && [ -n "${BENCH_INSTALL_PROBE}" ] && \
+       ! docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}" 2>/dev/null; then
+        echo "==> install probe ${BENCH_INSTALL_PROBE} missing after install; retrying benchpress install -f"
+        docker exec "${BENCH_CONTAINER}" bash -c \
+            "cd /DCPerf && ./benchpress_cli.py install -f ${BENCH_JOB}" \
+            2>&1 | tee -a "${log}"
+    fi
+
     # If pre_install launched background work (e.g. videotranscode's parallel
     # dataset download), join it here before declaring install done.
     bench_post_install
