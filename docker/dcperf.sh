@@ -127,7 +127,7 @@ container_exec_env_args() {
     local -n out=$1
     local name
     out=()
-    for name in DCPERF_LEAF_WAIT DCPERF_PERF_RECORD; do
+    for name in DCPERF_LEAF_WAIT DCPERF_PERF_RECORD DCPERF_ENABLE_PERF_HOOK; do
         if [ "${!name+x}" = "x" ]; then
             out+=("-e" "${name}=${!name}")
         fi

@@ -72,12 +72,22 @@ class Perf(Hook):
             if key in opts:
                 self.opts[key].update(opts[key])
 
+        self.monitors = []
+        enable_perf_hook = os.environ.get("DCPERF_ENABLE_PERF_HOOK", "0")
+        if enable_perf_hook.strip().lower() != "1":
+            logger.warning(
+                "Benchpress perf hook disabled by "
+                "DCPERF_ENABLE_PERF_HOOK=%r; no perf monitors will be "
+                "constructed or started",
+                enable_perf_hook,
+            )
+            return
+
         self.benchmark_metrics_dir = BP_BASEPATH + f"/benchmark_metrics_{job.uuid}"
         if not os.path.isdir(self.benchmark_metrics_dir):
             os.mkdir(self.benchmark_metrics_dir)
 
         should_run_perf_stat = True
-        self.monitors = []
         for mon_name in AVAIL_MONITORS.keys():
             try:
                 MonitorClass = AVAIL_MONITORS[mon_name]
@@ -123,9 +133,9 @@ class Perf(Hook):
                 logger.warning(traceback.print_exception(type(e), e, e.__traceback__))
 
     def after_job(self, opts, job):
-        for monitor in self.monitors:
+        for monitor in getattr(self, "monitors", []):
             monitor.terminate()
-        for monitor in self.monitors:
+        for monitor in getattr(self, "monitors", []):
             monitor.write_csv()
         # After every monitor has written its primary CSV, give each one
         # a chance to emit derived metrics that depend on sibling
@@ -135,7 +145,7 @@ class Perf(Hook):
         # (`AMDPerfUtil` and `DummyPerfUtil` in topdown.py do not), so
         # only invoke `post_process` when the attribute is actually
         # present and callable.
-        for monitor in self.monitors:
+        for monitor in getattr(self, "monitors", []):
             pp = getattr(monitor, "post_process", None)
             if not callable(pp):
                 continue
