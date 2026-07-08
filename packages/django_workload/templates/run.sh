@@ -212,7 +212,9 @@ start_clientserver() {
 
   # Wait for the server to start
   local retries=150
-  while ! nc -z localhost 8000; do
+  local server_addr
+  server_addr="${DCPERF_DJANGO_SERVER_ADDR:-127.0.0.1}"
+  while ! nc -z "${server_addr}" 8000; do
       sleep 1
       retries=$((retries-1))
       if [[ "$retries" -le 0 ]]; then
@@ -226,7 +228,7 @@ start_clientserver() {
       echo "Django server port is open; waiting ${ready_grace}s for uWSGI workers"
       sleep "$ready_grace"
   fi
-  start_client "${num_client_workers}" "${duration}" "${siege_logs_path}" "${urls_path}" localhost "${iterations}" "${reps}"
+  start_client "${num_client_workers}" "${duration}" "${siege_logs_path}" "${urls_path}" "${server_addr}" "${iterations}" "${reps}"
 }
 
 main() {
