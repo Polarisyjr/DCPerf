@@ -145,7 +145,7 @@ container_network_mode() {
 
 expected_network_mode() {
     case "${BENCH_NETWORK:-isolated}" in
-        isolated|bridge|default|"") printf 'default\n' ;;
+        isolated|bridge|default|"") printf 'bridge\n' ;;
         host) printf 'host\n' ;;
         *) printf '%s\n' "${BENCH_NETWORK}" ;;
     esac
@@ -155,7 +155,7 @@ docker_network_args() {
     local mode
     mode="$(expected_network_mode)"
     case "$mode" in
-        default) : ;;
+        bridge) : ;;
         host) printf '%s\n' "--network=host" ;;
         *) printf '%s\n' "--network=${mode}" ;;
     esac
@@ -165,7 +165,7 @@ check_container_network_matches() {
     local actual expected
     actual="$(container_network_mode)"
     expected="$(expected_network_mode)"
-    # Docker reports the default bridge as "default" for HostConfig.NetworkMode.
+    # Docker reports an omitted --network flag as "bridge" for HostConfig.NetworkMode.
     if [ "$actual" != "$expected" ]; then
         cat >&2 <<EOF
 container ${BENCH_CONTAINER} has network mode '${actual}', expected '${expected}'.
