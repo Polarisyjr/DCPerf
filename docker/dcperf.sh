@@ -11,7 +11,7 @@
 #   ./dcperf.sh help                  Show this help
 #
 # <bench> (case-insensitive, matches subdir name in docker/):
-#   feedsim | djangobench | taobench | mediawiki | videotranscode
+#   feedsim | django | djangobench | taobench | mediawiki | videotranscode
 #
 # <subcmd>:
 #   all              setup + install + bench
@@ -28,6 +28,8 @@
 #                            the rest via `docker update --cpuset-cpus` so a
 #                            core-saturating bench can't starve the host
 #                            (e.g. the Azure guest-agent heartbeat). Default 0.
+#   DCPERF_LEAF_WAIT=N       feedsim-only: override LeafNodeRank warmup wait.
+#   DCPERF_PERF_RECORD=1     pass through to benchmarks that support perf.data.
 
 set -euo pipefail
 
@@ -47,6 +49,12 @@ BENCH_INSTALL_ETA=""
 BENCH_RUN_ETA=""
 SAVED_GATES_FILE=""
 
+if [ -n "${DOCKER_CMD:-}" ]; then
+    docker() { read -r -a _docker_cmd <<< "$DOCKER_CMD"; "${_docker_cmd[@]}" "$@"; }
+elif ! command docker ps >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
+    docker() { sudo -n docker "$@"; }
+fi
+
 usage() {
     sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -58,6 +66,9 @@ usage() {
 load_bench() {
     local input_lower
     input_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$input_lower" in
+        django) input_lower=djangobench ;;
+    esac
     BENCH_DIR="${DOCKER_DIR}/${input_lower}"
     if [ ! -d "$BENCH_DIR" ]; then
         echo "unknown bench: $1 (no docker/${input_lower}/ directory)" >&2
@@ -110,6 +121,17 @@ require_container() {
     # to hardening defaults) + plain `start` would leave perf/bpftrace silently
     # degraded. Idempotent: no-op when already relaxed.
     relax_perf_paranoid
+}
+
+container_exec_env_args() {
+    local -n out=$1
+    local name
+    out=()
+    for name in DCPERF_LEAF_WAIT DCPERF_PERF_RECORD; do
+        if [ "${!name+x}" = "x" ]; then
+            out+=("-e" "${name}=${!name}")
+        fi
+    done
 }
 
 # Reserve BENCH_RESERVE_CORES host cores by pinning the container to the rest
@@ -326,7 +348,9 @@ cmd_bench() {
     #   ./dcperf.sh taobench bench -i '{"memsize":128}'
     # ${BENCH_RUN_ARGS[@]} expands to nothing when the array is empty
     # (unlike [*] in a single-quoted string), so empty arrays are safe.
-    docker exec -w /DCPerf "${BENCH_CONTAINER}" \
+    local exec_env=()
+    container_exec_env_args exec_env
+    docker exec "${exec_env[@]}" -w /DCPerf "${BENCH_CONTAINER}" \
         ./benchpress_cli.py run "${BENCH_JOB}" "${BENCH_RUN_ARGS[@]}" "$@"
 }
 

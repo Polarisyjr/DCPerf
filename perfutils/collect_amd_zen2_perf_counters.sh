@@ -135,7 +135,7 @@ LAYOUT_4PMC="${TD_OCCUPANCY_GROUP},${TD_STALL_GROUP},${CORE_BASE_GROUP},${L2_COD
 
 PERF_PID=
 wrapup() {
-  kill -INT "$PERF_PID"
+  [[ -n "${PERF_PID:-}" ]] && kill -INT "$PERF_PID" 2>/dev/null || true
 }
 
 trap wrapup SIGINT SIGTERM
@@ -161,12 +161,17 @@ pick_event_set() {
   local probe="${PMC6_CORE_GROUP}"
   local out
   out="$(perf stat -e "$probe" -a -- \
-         bash -c 'n=0; while ((n<30000000)); do ((n++)); done' 2>&1)"
+         bash -c 'yes >/dev/null & p=$!; sleep 0.5; kill "$p"; wait "$p" 2>/dev/null || true' 2>&1)"
   if echo "$out" | grep -q "not counted"; then
     echo "$LAYOUT_4PMC"
   else
     echo "$LAYOUT_6PMC"
   fi
+}
+
+perf_event_ok() {
+  local ev="$1"
+  perf stat -e "$ev" -a -- sleep 0.1 >/dev/null 2>&1
 }
 
 collect_counters() {
@@ -179,10 +184,18 @@ collect_counters() {
   interval_ms="$((interval * 1000))"
 
   events="$(pick_event_set)"
+  # Some virtualized Zen2 hosts reject the runtime probe in ways that produce no
+  # stdout instead of an explicit "<not counted>" marker. Keep the collector
+  # useful by falling back to the VM-safe 4-PMC layout instead of later invoking
+  # perf with an empty event string.
+  if [[ -z "${events}" ]]; then
+    events="$LAYOUT_4PMC"
+  fi
 
   # CPU utilization = mperf/tsc. These live on the free-running msr PMU, so they
   # do not contend with the core PMCs above. Only request them if present.
-  if [[ -f /sys/bus/event_source/devices/msr/events/mperf ]]; then
+  if [[ -f /sys/bus/event_source/devices/msr/events/mperf ]] && \
+     perf_event_ok "msr/mperf,name=mperf/,msr/tsc,name=tsc/"; then
     events="${events},msr/mperf,name=mperf/,msr/tsc,name=tsc/"
   fi
 
