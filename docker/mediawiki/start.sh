@@ -13,6 +13,16 @@ BENCH_RUN_ARGS=()
 BENCH_INSTALL_ETA="builds wrk + memcached + composer install of MediaWiki; ~10-25 min"
 BENCH_RUN_ETA="auto-scaled HHVM, wrk 10m client-duration, total ~15-20 min"
 
+bench_install_ready() {
+    docker exec "$BENCH_CONTAINER" bash -c '
+        test -x /DCPerf/benchmarks/oss_performance_mediawiki/wrk/wrk &&
+        test -x /usr/local/memcached/bin/memcached &&
+        test -x /usr/local/bin/siege &&
+        test -x /usr/local/hphpi/legacy/bin/hhvm &&
+        test -f /DCPerf/oss-performance/perf.php
+    ' 2>/dev/null
+}
+
 # Inject the `perf` hook (10-monitor bundle: mpstat / memstat / netstat /
 # cpufreq_* / perfstat / topdown / power / ctxsw / syscall_ebpf) ahead of the
 # default copymove hook for the _mlp variant. Idempotent. Same surgical edit
@@ -82,12 +92,12 @@ bench_post_install() {
 # Skip cleanup_oss_performance_mediawiki.sh's `systemctl stop mariadb` -- the
 # systemctl shim handles it but we're about to restart mariadb anyway. Just
 # wipe the install artifacts so install_oss_performance_mediawiki.sh re-runs
-# from clean state. /usr/local/bin/siege and /opt/local/hhvm-3.30 survive on
-# purpose: siege is cheap to rebuild but the install script short-circuits
-# on `command -v siege`, and HHVM is baked into the image.
+# from clean state. Siege and memcached are rebuilt into the current container;
+# HHVM survives because it is baked into the image.
 bench_force_cleanup() {
     docker exec "$BENCH_CONTAINER" bash -c '
         rm -rf /DCPerf/oss-performance \
+               /DCPerf/siege \
                /DCPerf/benchmarks/oss_performance_mediawiki \
                /DCPerf/memcached-1.5.12
     '

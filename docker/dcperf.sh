@@ -97,6 +97,10 @@ load_bench() {
     bench_force_cleanup()  { :; }
     bench_pre_install()    { :; }
     bench_post_install()   { :; }
+    bench_install_ready() {
+        [ -n "${BENCH_INSTALL_PROBE}" ] && \
+            docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}" 2>/dev/null
+    }
     # shellcheck source=/dev/null
     source "$BENCH_DIR/start.sh"
     if [ -z "${BENCH_JOB:-}" ]; then
@@ -278,6 +282,16 @@ cmd_setup() {
     cmd_build
 
     if container_exists; then
+        local container_image current_image
+        container_image="$(docker inspect -f '{{.Image}}' "${BENCH_CONTAINER}")"
+        current_image="$(docker image inspect -f '{{.Id}}' "${BENCH_IMAGE}")"
+        if [ "$container_image" != "$current_image" ]; then
+            echo "==> image changed; recreating stale container ${BENCH_CONTAINER}"
+            docker rm -f "${BENCH_CONTAINER}" >/dev/null
+        fi
+    fi
+
+    if container_exists; then
         check_container_network_matches
         if container_running; then
             echo "==> container ${BENCH_CONTAINER} already running"
@@ -337,8 +351,7 @@ cmd_install() {
         -f|--force|--reinstall) force=1 ;;
     esac
 
-    if [ "${force}" = 0 ] && [ -n "${BENCH_INSTALL_PROBE}" ] && \
-       docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}" 2>/dev/null; then
+    if [ "${force}" = 0 ] && bench_install_ready; then
         echo "==> ${BENCH} already installed (${BENCH_INSTALL_PROBE} exists); pass --force to reinstall"
         # Still apply jobs.yml patch in case the binary predates this script.
         bench_patch_jobs_yml
@@ -377,9 +390,9 @@ cmd_install() {
     # and print "already installed" even though container-local binaries such
     # as /usr/local/bin/siege are absent. If the probe is still missing after a
     # nominal install, force exactly one reinstall.
-    if [ "${force}" = 0 ] && [ -n "${BENCH_INSTALL_PROBE}" ] && \
-       ! docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}" 2>/dev/null; then
+    if [ "${force}" = 0 ] && ! bench_install_ready; then
         echo "==> install probe ${BENCH_INSTALL_PROBE} missing after install; retrying benchpress install -f"
+        bench_force_cleanup
         docker exec "${BENCH_CONTAINER}" bash -c \
             "cd /DCPerf && ./benchpress_cli.py install -f ${BENCH_JOB}" \
             2>&1 | tee -a "${log}"
@@ -389,8 +402,7 @@ cmd_install() {
     # dataset download), join it here before declaring install done.
     bench_post_install
 
-    if [ -n "${BENCH_INSTALL_PROBE}" ] && \
-       docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}"; then
+    if bench_install_ready; then
         echo "==> install OK"
     else
         echo "==> install FAILED; see ${log}" >&2
