@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Per-bench definition for django_workload (-r standalone). Sourced by ../dcperf.sh.
-# Wraps DCPerf's `django_workload_default` job in standalone mode so cassandra
+# Wraps DCPerf's parameterized job in standalone mode so cassandra
 # / memcached / uwsgi / siege all run in this single container. Default
 # `clientserver` mode would need an external cassandra host.
 
-BENCH_JOB="django_workload_default"
+BENCH_JOB="django_workload_custom"
 # install_siege.sh declares $SIEGE_INSTALLATION_PREFIX but its ./configure call
 # has no --prefix, so siege actually lands at /usr/local/bin/siege (autotools
 # default). Probe where it actually lands, not where the variable claims.
@@ -19,7 +19,7 @@ BENCH_RUN_ARGS=(-r standalone)
 BENCH_INSTALL_ETA="downloads cassandra-3.11.10 (~50MB) + pip pkgs + builds siege; ~5-20 min"
 BENCH_RUN_ETA="-r standalone, ~35 min: 7 iters x 5 min"
 
-# django_workload_default starts with only the copymove hook. Insert a `perf`
+# django_workload_custom starts with only the copymove hook. Insert a `perf`
 # hook in front so we get the full 10-monitor bundle. Idempotent.
 bench_patch_jobs_yml() {
     docker exec -i "$BENCH_CONTAINER" python3 - <<'PYEOF'
@@ -28,13 +28,13 @@ import pathlib, re, sys
 p = pathlib.Path('/DCPerf/benchpress/config/jobs.yml')
 s = p.read_text()
 
-# Only touch the django_workload_default entry (not _arm / _custom).
+# Only touch the django_workload_custom entry.
 m = re.search(
-    r'(?ms)^- benchmark: django_workload\n  name: django_workload_default\n.*?(?=^- benchmark:|\Z)',
+    r'(?ms)^- benchmark: django_workload\n  name: django_workload_custom\n.*?(?=^- benchmark:|\Z)',
     s,
 )
 if not m:
-    sys.exit('jobs.yml: django_workload_default entry not found')
+    sys.exit('jobs.yml: django_workload_custom entry not found')
 block = m.group(0)
 
 if '- hook: perf' in block:
@@ -51,10 +51,10 @@ new_block, n = re.subn(
     flags=re.M,
 )
 if n == 0:
-    sys.exit('jobs.yml: django_workload_default hooks block does not match expected layout')
+    sys.exit('jobs.yml: django_workload_custom hooks block does not match expected layout')
 
 p.write_text(s.replace(block, new_block, 1))
-print('jobs.yml: inserted perf hook into django_workload_default')
+print('jobs.yml: inserted perf hook into django_workload_custom')
 PYEOF
     # uwsgi.ini may already be deployed here (short-circuit path); fix it now.
     # Fresh installs deploy it during benchpress install -> bench_post_install.

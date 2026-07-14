@@ -162,7 +162,9 @@ start_django_server() {
   fi
   # Create database schema
   export LD_LIBRARY_PATH=${SCRIPT_ROOT}/../django-workload/django-workload/:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-  DJANGO_SETTINGS_MODULE=cluster_settings ./venv/bin/django-admin flush
+  if ! DJANGO_SETTINGS_MODULE=cluster_settings ./venv/bin/django-admin flush; then
+    echo "Django flush failed; schema may be absent on first run. Continuing to setup." >&2
+  fi
   DJANGO_SETTINGS_MODULE=cluster_settings ./venv/bin/django-admin setup
 
   echo "Running django server with ${num_server_workers} uWSGI workers"
@@ -210,7 +212,9 @@ start_clientserver() {
 
   # Wait for the server to start
   local retries=150
-  while ! nc -z localhost 8000; do
+  local server_addr
+  server_addr="${DCPERF_DJANGO_SERVER_ADDR:-127.0.0.1}"
+  while ! nc -z "${server_addr}" 8000; do
       sleep 1
       retries=$((retries-1))
       if [[ "$retries" -le 0 ]]; then
@@ -218,7 +222,13 @@ start_clientserver() {
           exit 1
       fi
   done
-  start_client "${num_client_workers}" "${duration}" "${siege_logs_path}" "${urls_path}" localhost "${iterations}" "${reps}"
+  local ready_grace
+  ready_grace="${DCPERF_DJANGO_READY_GRACE_SEC:-10}"
+  if [[ "$ready_grace" -gt 0 ]]; then
+      echo "Django server port is open; waiting ${ready_grace}s for uWSGI workers"
+      sleep "$ready_grace"
+  fi
+  start_client "${num_client_workers}" "${duration}" "${siege_logs_path}" "${urls_path}" "${server_addr}" "${iterations}" "${reps}"
 }
 
 main() {

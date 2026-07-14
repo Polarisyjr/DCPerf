@@ -11,7 +11,7 @@
 #   ./dcperf.sh help                  Show this help
 #
 # <bench> (case-insensitive, matches subdir name in docker/):
-#   feedsim | djangobench | taobench | mediawiki | videotranscode
+#   feedsim | django | djangobench | taobench | mediawiki | videotranscode
 #
 # <subcmd>:
 #   all              setup + install + bench
@@ -28,6 +28,11 @@
 #                            the rest via `docker update --cpuset-cpus` so a
 #                            core-saturating bench can't starve the host
 #                            (e.g. the Azure guest-agent heartbeat). Default 0.
+#   BENCH_NETWORK=isolated|host|<docker-net>
+#                            container network policy. Default isolated
+#                            (Docker bridge). host must be explicit.
+#   DCPERF_LEAF_WAIT=N       feedsim-only: override LeafNodeRank warmup wait.
+#   DCPERF_PERF_RECORD=1     pass through to benchmarks that support perf.data.
 
 set -euo pipefail
 
@@ -45,7 +50,14 @@ BENCH_INSTALL_PROBE=""
 BENCH_RUN_ARGS=()
 BENCH_INSTALL_ETA=""
 BENCH_RUN_ETA=""
+BENCH_NETWORK=""
 SAVED_GATES_FILE=""
+
+if [ -n "${DOCKER_CMD:-}" ]; then
+    docker() { read -r -a _docker_cmd <<< "$DOCKER_CMD"; "${_docker_cmd[@]}" "$@"; }
+elif ! command docker ps >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
+    docker() { sudo -n docker "$@"; }
+fi
 
 usage() {
     sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -58,6 +70,9 @@ usage() {
 load_bench() {
     local input_lower
     input_lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$input_lower" in
+        django) input_lower=djangobench ;;
+    esac
     BENCH_DIR="${DOCKER_DIR}/${input_lower}"
     if [ ! -d "$BENCH_DIR" ]; then
         echo "unknown bench: $1 (no docker/${input_lower}/ directory)" >&2
@@ -71,6 +86,7 @@ load_bench() {
     BENCH_IMAGE="dcperf-${BENCH}:centos9"
     BENCH_CONTAINER="dcperf-${BENCH}"
     BENCH_RUN_ARGS=()
+    BENCH_NETWORK="${BENCH_NETWORK:-isolated}"
     # Host cores to reserve (cpuset applied via docker update). Comes from the
     # caller's environment, e.g. `DCPERF_RESERVE_CORES=8 ./dcperf.sh django all`;
     # defaults to 0 (no reservation). Not baked per-bench so the sweep/operator
@@ -81,6 +97,10 @@ load_bench() {
     bench_force_cleanup()  { :; }
     bench_pre_install()    { :; }
     bench_post_install()   { :; }
+    bench_install_ready() {
+        [ -n "${BENCH_INSTALL_PROBE}" ] && \
+            docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}" 2>/dev/null
+    }
     # shellcheck source=/dev/null
     source "$BENCH_DIR/start.sh"
     if [ -z "${BENCH_JOB:-}" ]; then
@@ -110,6 +130,55 @@ require_container() {
     # to hardening defaults) + plain `start` would leave perf/bpftrace silently
     # degraded. Idempotent: no-op when already relaxed.
     relax_perf_paranoid
+}
+
+container_exec_env_args() {
+    local -n out=$1
+    local name
+    out=()
+    for name in DCPERF_LEAF_WAIT DCPERF_PERF_RECORD DCPERF_ENABLE_PERF_HOOK; do
+        if [ "${!name+x}" = "x" ]; then
+            out+=("-e" "${name}=${!name}")
+        fi
+    done
+}
+
+container_network_mode() {
+    docker inspect -f '{{.HostConfig.NetworkMode}}' "${BENCH_CONTAINER}" 2>/dev/null || true
+}
+
+expected_network_mode() {
+    case "${BENCH_NETWORK:-isolated}" in
+        isolated|bridge|default|"") printf 'bridge\n' ;;
+        host) printf 'host\n' ;;
+        *) printf '%s\n' "${BENCH_NETWORK}" ;;
+    esac
+}
+
+docker_network_args() {
+    local mode
+    mode="$(expected_network_mode)"
+    case "$mode" in
+        bridge) : ;;
+        host) printf '%s\n' "--network=host" ;;
+        *) printf '%s\n' "--network=${mode}" ;;
+    esac
+}
+
+check_container_network_matches() {
+    local actual expected
+    actual="$(container_network_mode)"
+    expected="$(expected_network_mode)"
+    # Docker reports an omitted --network flag as "bridge" for HostConfig.NetworkMode.
+    if [ "$actual" != "$expected" ]; then
+        cat >&2 <<EOF
+container ${BENCH_CONTAINER} has network mode '${actual}', expected '${expected}'.
+Network mode cannot be changed in place; run:
+  ./docker/dcperf.sh ${BENCH} clean
+  BENCH_NETWORK=${BENCH_NETWORK:-isolated} ./docker/dcperf.sh ${BENCH} setup
+EOF
+        exit 1
+    fi
 }
 
 # Reserve BENCH_RESERVE_CORES host cores by pinning the container to the rest
@@ -213,6 +282,17 @@ cmd_setup() {
     cmd_build
 
     if container_exists; then
+        local container_image current_image
+        container_image="$(docker inspect -f '{{.Image}}' "${BENCH_CONTAINER}")"
+        current_image="$(docker image inspect -f '{{.Id}}' "${BENCH_IMAGE}")"
+        if [ "$container_image" != "$current_image" ]; then
+            echo "==> image changed; recreating stale container ${BENCH_CONTAINER}"
+            docker rm -f "${BENCH_CONTAINER}" >/dev/null
+        fi
+    fi
+
+    if container_exists; then
+        check_container_network_matches
         if container_running; then
             echo "==> container ${BENCH_CONTAINER} already running"
         else
@@ -230,10 +310,17 @@ cmd_setup() {
         # monitors visibility into host pids; remove only if you want strict
         # container isolation (and accept that pkill/ps in bench scripts will
         # see only container processes).
+        local network_args=()
+        mapfile -t network_args < <(docker_network_args)
+        if [ "${#network_args[@]}" -gt 0 ]; then
+            echo "==> network mode: $(expected_network_mode)"
+        else
+            echo "==> network mode: isolated/default bridge"
+        fi
         docker run -d \
             --name "${BENCH_CONTAINER}" \
             --privileged \
-            --network=host \
+            "${network_args[@]}" \
             --pid=host \
             --ipc=host \
             --cap-add=SYS_ADMIN --cap-add=PERFMON --cap-add=SYS_PTRACE --cap-add=IPC_LOCK \
@@ -264,8 +351,7 @@ cmd_install() {
         -f|--force|--reinstall) force=1 ;;
     esac
 
-    if [ "${force}" = 0 ] && [ -n "${BENCH_INSTALL_PROBE}" ] && \
-       docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}" 2>/dev/null; then
+    if [ "${force}" = 0 ] && bench_install_ready; then
         echo "==> ${BENCH} already installed (${BENCH_INSTALL_PROBE} exists); pass --force to reinstall"
         # Still apply jobs.yml patch in case the binary predates this script.
         bench_patch_jobs_yml
@@ -299,12 +385,24 @@ cmd_install() {
         "cd /DCPerf && ./benchpress_cli.py install ${bp_force} ${BENCH_JOB}" \
         2>&1 | tee "${log}"
 
+    # Network-mode migration recreates the container but keeps /DCPerf
+    # bind-mounted state. benchpress may therefore see benchmark_installs.txt
+    # and print "already installed" even though container-local binaries such
+    # as /usr/local/bin/siege are absent. If the probe is still missing after a
+    # nominal install, force exactly one reinstall.
+    if [ "${force}" = 0 ] && ! bench_install_ready; then
+        echo "==> install probe ${BENCH_INSTALL_PROBE} missing after install; retrying benchpress install -f"
+        bench_force_cleanup
+        docker exec "${BENCH_CONTAINER}" bash -c \
+            "cd /DCPerf && ./benchpress_cli.py install -f ${BENCH_JOB}" \
+            2>&1 | tee -a "${log}"
+    fi
+
     # If pre_install launched background work (e.g. videotranscode's parallel
     # dataset download), join it here before declaring install done.
     bench_post_install
 
-    if [ -n "${BENCH_INSTALL_PROBE}" ] && \
-       docker exec "${BENCH_CONTAINER}" test -x "${BENCH_INSTALL_PROBE}"; then
+    if bench_install_ready; then
         echo "==> install OK"
     else
         echo "==> install FAILED; see ${log}" >&2
@@ -326,7 +424,9 @@ cmd_bench() {
     #   ./dcperf.sh taobench bench -i '{"memsize":128}'
     # ${BENCH_RUN_ARGS[@]} expands to nothing when the array is empty
     # (unlike [*] in a single-quoted string), so empty arrays are safe.
-    docker exec -w /DCPerf "${BENCH_CONTAINER}" \
+    local exec_env=()
+    container_exec_env_args exec_env
+    docker exec "${exec_env[@]}" -w /DCPerf "${BENCH_CONTAINER}" \
         ./benchpress_cli.py run "${BENCH_JOB}" "${BENCH_RUN_ARGS[@]}" "$@"
 }
 

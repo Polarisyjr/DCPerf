@@ -24,6 +24,14 @@ RUN dnf install -y \
 RUN dnf install -y \
         gcc gcc-c++ make wget tar xz which procps-ng
 
+# The benchmark build tree is host-mounted and can survive a container/image
+# replacement. Keep its dynamically linked runtime in the image so an install
+# probe cannot succeed while LeafNodeRank immediately fails to load.
+RUN dnf install -y \
+        double-conversion snappy jemalloc glog gflags \
+        boost-context boost-filesystem boost-program-options boost-regex \
+        libicu libunwind
+
 # DCPerf benchpress runtime expectations:
 #   - hw fingerprint at run-start: dmidecode, lshw, lscpu (util-linux), pciutils, numactl
 #   - the cpu-mpstat / perf hooks: sysstat, perf, bc

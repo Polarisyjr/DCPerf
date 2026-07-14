@@ -2721,6 +2721,10 @@ def main(
         metrics.append(zen4_mem_write_bw_MBps(grouped_df))
 
     filtered_metrics = list(itertools.filterfalse(lambda x: x is None, metrics))
+    if not filtered_metrics:
+        if series:
+            series.write("")
+        return
     shortest_series = max(filtered_metrics, key=lambda m: m["series"].size)
     df_metrics = concat_series(filtered_metrics, shortest_series)
     if series:
