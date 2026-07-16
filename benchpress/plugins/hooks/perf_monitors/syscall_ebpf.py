@@ -7,6 +7,7 @@
 # pyre-unsafe
 
 import os
+import re
 import subprocess
 import time
 
@@ -42,19 +43,66 @@ SYSCALLS = {
 
 CAT_ID = {"fs": 1, "mm": 2, "thread": 3, "net": 4}
 CAT_NAME = {v: k for k, v in CAT_ID.items()}
+GROUP_TARGET = 1
+GROUP_OTHER = 2
+_SAFE_GROUP_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
-def _build_script(interval):
+def _quote_bpftrace_string(value):
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _cgroup_id_for_pid(pid):
+    """Return the cgroup-v2 ID used by bpf_get_current_cgroup_id()."""
+    with open(f"/proc/{int(pid)}/cgroup") as f:
+        for line in f:
+            _hierarchy, controllers, relative = line.rstrip("\n").split(":", 2)
+            if controllers == "":
+                # A unified-only host mounts cgroup2 at /sys/fs/cgroup; this
+                # host uses hybrid mode and mounts it at
+                # /sys/fs/cgroup/unified.  Try both conventional locations.
+                for mountpoint in ("/sys/fs/cgroup", "/sys/fs/cgroup/unified"):
+                    path = os.path.join(mountpoint, relative.lstrip("/"))
+                    try:
+                        return os.stat(path).st_ino
+                    except FileNotFoundError:
+                        continue
+                raise ValueError(
+                    f"PID {pid} cgroup-v2 path is not mounted: {relative}"
+                )
+    raise ValueError(f"PID {pid} has no cgroup-v2 membership")
+
+
+def _build_script(
+    interval,
+    target_name="target",
+    target_comms=(),
+    target_tgids=(),
+    target_cgroup_ids=(),
+):
+    split = bool(target_comms or target_tgids or target_cgroup_ids)
     parts = ["BEGIN {"]
     for cat, nrs in SYSCALLS.items():
         cid = CAT_ID[cat]
         for nr in nrs:
             parts.append(f"  @cat[{nr}] = {cid};")
+    if split:
+        parts.append(f'  printf("=GROUP= {target_name}\\n");')
     parts.append("}")
     parts.append("")
     parts.append("tracepoint:raw_syscalls:sys_enter {")
     parts.append("  $c = @cat[args->id];")
-    parts.append("  if ($c > 0) { @cnt[$c] = count(); }")
+    if split:
+        selectors = [f"comm == {_quote_bpftrace_string(v)}" for v in target_comms]
+        selectors += [f"pid == {v}" for v in target_tgids]
+        selectors += [f"cgroup == {v}" for v in target_cgroup_ids]
+        predicate = " || ".join(selectors)
+        parts.append("  if ($c > 0) {")
+        parts.append(f"    $g = ({predicate}) ? {GROUP_TARGET} : {GROUP_OTHER};")
+        parts.append("    @cnt[$g * 10 + $c] = count();")
+        parts.append("  }")
+    else:
+        parts.append("  if ($c > 0) { @cnt[$c] = count(); }")
     parts.append("}")
     parts.append("")
     parts.append(f"interval:s:{interval} {{")
@@ -83,8 +131,39 @@ class SyscallEBPF(Monitor):
     and emits `syscall-ebpf.derived.csv` alongside the raw counts.
     """
 
-    def __init__(self, interval, job_uuid):
+    def __init__(
+        self,
+        interval,
+        job_uuid,
+        target_name="target",
+        target_comms=None,
+        target_tgids=None,
+        target_cgroup_ids=None,
+        target_cgroup_pids=None,
+    ):
+        """Create the monitor, optionally splitting one target from the host.
+
+        Selectors are ORed. ``target_cgroup_pids`` is a convenience option that
+        resolves each PID's cgroup-v2 ID at monitor construction time.  A
+        cgroup selector is preferred for containers because it includes every
+        subprocess and thread, even when their ``comm`` names differ.
+        """
         super(SyscallEBPF, self).__init__(interval, "syscall-ebpf", job_uuid)
+        if not _SAFE_GROUP_NAME.fullmatch(target_name):
+            raise ValueError(
+                "target_name must start with a letter and contain only "
+                "letters, digits, and underscores"
+            )
+        self.target_name = target_name
+        self.target_comms = tuple(str(v) for v in (target_comms or ()))
+        self.target_tgids = tuple(sorted({int(v) for v in (target_tgids or ())}))
+        cgroup_ids = {int(v) for v in (target_cgroup_ids or ())}
+        for pid in target_cgroup_pids or ():
+            cgroup_ids.add(_cgroup_id_for_pid(pid))
+        self.target_cgroup_ids = tuple(sorted(cgroup_ids))
+        self.split_enabled = bool(
+            self.target_comms or self.target_tgids or self.target_cgroup_ids
+        )
 
     def _close_current(self):
         if self._current is not None:
@@ -101,6 +180,11 @@ class SyscallEBPF(Monitor):
             "thread": 0,
             "net": 0,
         }
+        if getattr(self, "split_enabled", False):
+            target_name = getattr(self, "target_name", "target")
+            for cat in CAT_ID:
+                self._current[f"{target_name}_{cat}"] = 0
+                self._current[f"other_{cat}"] = 0
         self._idx += 1
 
     def _process_output(self, line):
@@ -110,6 +194,12 @@ class SyscallEBPF(Monitor):
         if s.startswith("=TS="):
             self._open_bucket()
             return
+        if s.startswith("=GROUP="):
+            target_name = s[len("=GROUP=") :].strip()
+            if _SAFE_GROUP_NAME.fullmatch(target_name):
+                self.target_name = target_name
+                self.split_enabled = True
+            return
         if s.startswith("@cnt["):
             try:
                 rb = s.index("]")
@@ -118,12 +208,24 @@ class SyscallEBPF(Monitor):
                 cnt = int(s[colon + 1 :].strip())
             except (ValueError, IndexError):
                 return
+            group = None
+            if cid >= 10:
+                group, cid = divmod(cid, 10)
             name = CAT_NAME.get(cid)
             if not name:
                 return
             if self._current is None:
                 self._open_bucket()
-            self._current[name] = cnt
+            if group == GROUP_TARGET:
+                target_name = getattr(self, "target_name", "target")
+                self._current[f"{target_name}_{name}"] = cnt
+                self._current[name] = cnt + self._current[f"other_{name}"]
+            elif group == GROUP_OTHER:
+                target_name = getattr(self, "target_name", "target")
+                self._current[f"other_{name}"] = cnt
+                self._current[name] = cnt + self._current[f"{target_name}_{name}"]
+            elif group is None:
+                self._current[name] = cnt
 
     def process_output(self, line):
         try:
@@ -157,7 +259,13 @@ class SyscallEBPF(Monitor):
     def run(self):
         self._idx = 0
         self._current = None
-        script = _build_script(self.interval)
+        script = _build_script(
+            self.interval,
+            self.target_name,
+            self.target_comms,
+            self.target_tgids,
+            self.target_cgroup_ids,
+        )
         args = ["bpftrace"]
         if self._bpftrace_supports_quiet():
             args.append("-q")
@@ -184,7 +292,11 @@ class SyscallEBPF(Monitor):
                 "derivation"
             )
             return
-        cats = ("fs", "mm", "thread", "net")
+        cats = list(CAT_ID)
+        if self.split_enabled:
+            cats += [f"{self.target_name}_{cat}" for cat in CAT_ID]
+            cats += [f"other_{cat}" for cat in CAT_ID]
+        cats = tuple(cats)
         # Align by timestamp (not sample index) so the derived series spans the
         # whole run even when the instruction collector sampled at a different /
         # irregular cadence than this 5s-steady eBPF monitor.
