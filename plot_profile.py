@@ -36,6 +36,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -299,31 +300,62 @@ def fig_syscalls(metrics_dir: str, out: str, bench: str, start=None, end=None):
         print("  skip syscalls: no syscall-ebpf.derived.csv")
         return
     t = clock_to_elapsed(rows)
-    cats = [("fs_per_kI", "filesystem", "#4c72b0"),
-            ("mm_per_kI", "memory mgmt", "#dd8452"),
-            ("thread_per_kI", "thread mgmt", "#55a868"),
-            ("net_per_kI", "networking", "#c44e52")]
-    stacks, labels, colors = [], [], []
-    for cname, label, color in cats:
-        y = col(rows, cname)
-        if np.all(np.isnan(y)):
-            continue
-        stacks.append(np.nan_to_num(y))
-        labels.append(label)
-        colors.append(color)
+    cats = [("fs", "filesystem", "#4c72b0"),
+            ("mm", "memory mgmt", "#dd8452"),
+            ("thread", "thread mgmt", "#55a868"),
+            ("net", "networking", "#c44e52")]
+    split_cols = [f"{group}_{cat}_per_kI"
+                  for cat, _label, _color in cats
+                  for group in ("vllm", "other")]
+    split = all(name in rows[0] for name in split_cols)
+
+    stacks, colors, hatched = [], [], []
+    present_cats = []
+    for cat, label, color in cats:
+        if split:
+            other = col(rows, f"other_{cat}_per_kI")
+            vllm = col(rows, f"vllm_{cat}_per_kI")
+            if np.all(np.isnan(other)) and np.all(np.isnan(vllm)):
+                continue
+            # Keep each category as one contiguous color band. The vLLM part
+            # is the hatched upper slice of that band; other remains solid.
+            stacks.extend([np.nan_to_num(other), np.nan_to_num(vllm)])
+            colors.extend([color, color])
+            hatched.extend([False, True])
+        else:
+            y = col(rows, f"{cat}_per_kI")
+            if np.all(np.isnan(y)):
+                continue
+            stacks.append(np.nan_to_num(y))
+            colors.append(color)
+            hatched.append(False)
+        present_cats.append((label, color))
     if not stacks:
         print("  skip syscalls: no per-kI columns")
         return
     cropped = _crop_arr(t, start, end, *stacks)
     t, stacks = cropped[0], list(cropped[1:])
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.stackplot(t, *stacks, labels=labels, colors=colors, alpha=0.85)
+    layers = ax.stackplot(t, *stacks, colors=colors, alpha=0.85)
+    for layer, is_hatched in zip(layers, hatched):
+        if is_hatched:
+            layer.set_hatch("////")
+            layer.set_edgecolor("#303030")
+            layer.set_linewidth(0.3)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("syscalls per kilo-instruction")
-    ax.set_title(f"{bench}: system calls per kI, by category (eBPF)")
+    title = f"{bench}: system calls per kI, by category (eBPF)"
+    if split:
+        title += " — hatched = vLLM"
+    ax.set_title(title)
     ax.set_xlim(np.nanmin(t), np.nanmax(t))
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, loc="upper right")
+    legend = [Patch(facecolor=color, label=label, alpha=0.85)
+              for label, color in present_cats]
+    if split:
+        legend.append(Patch(facecolor="white", edgecolor="#303030",
+                            hatch="////", label="vLLM portion"))
+    ax.legend(handles=legend, fontsize=8, loc="upper right")
     _save(fig, out, "fig4_syscalls_per_kI.png")
 
 
